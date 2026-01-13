@@ -95,20 +95,26 @@ async def send_mail_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg.add_alternative(html_template.format(app_name=app_name, dev_name=dev_name), subtype='html')
 
         try:
-            # SMTP কানেকশন লুপের ভেতরে রাখাই ভালো যেন কানেকশন ড্রপ না হয়
-            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+            # SMTP_SSL (465) এর বদলে SMTP (587) ব্যবহার করছি আরও ভালো কানেকশনের জন্য
+            with smtplib.SMTP('smtp.gmail.com', 587) as smtp:
+                smtp.starttls() # কানেকশন সিকিউর করা
                 smtp.login(EMAIL_USER, EMAIL_PASS)
                 smtp.send_message(msg)
             
+            # ডাটাবেজে আপডেট
             ref.child(key).update({'sent': True, 'sent_at': datetime.now().isoformat()})
             sent_count += 1
-            await asyncio.sleep(5) # ৫ সেকেন্ড গ্যাপ
+            
+            logger.info(f"✅ Sent to: {recipient_email}")
+            await asyncio.sleep(5) 
 
-            if sent_count % 10 == 0:
-                await update.message.reply_text(f"📈 স্ট্যাটাস: {sent_count}টি পাঠানো হয়েছে।")
+            # আপনার ৫টি ইমেইল যেহেতু, তাই প্রতি ইমেইলেই একটা মেসেজ পাক যাতে আপনি বুঝতে পারেন
+            await update.message.reply_text(f"📈 পাঠানো হয়েছে: {sent_count}টি ({recipient_email})")
+
         except Exception as e:
-            logger.error(f"Error sending to {recipient_email}: {e}")
+            logger.error(f"Error for {recipient_email}: {e}")
             continue
+
 
     await update.message.reply_text(f"✅ সম্পন্ন! মোট {sent_count}টি ইমেইল পাঠানো হয়েছে।")
 
