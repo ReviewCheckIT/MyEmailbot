@@ -19,7 +19,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Env Variables (Render-এ সেট করবেন) ---
+# --- Env Variables ---
 TOKEN = os.environ.get('EMAIL_BOT_TOKEN') 
 OWNER_ID = os.environ.get('BOT_OWNER_ID')
 FB_JSON = os.environ.get('FIREBASE_CREDENTIALS_JSON')
@@ -27,7 +27,6 @@ FB_URL = os.environ.get('FIREBASE_DATABASE_URL')
 EMAIL_USER = os.environ.get('EMAIL_USER') 
 EMAIL_PASS = os.environ.get('EMAIL_PASS') 
 
-# Render-এর জন্য পোর্ট এবং ইউআরএল সেটআপ
 PORT = int(os.environ.get('PORT', '10000'))
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
 
@@ -37,7 +36,7 @@ try:
         cred_dict = json.loads(FB_JSON)
         cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred, {'databaseURL': FB_URL})
-    logger.info("🔥 Firebase Connected!")
+    logger.info("🔥 Firebase Connected Successfully!")
 except Exception as e:
     logger.error(f"❌ Firebase Error: {e}")
     sys.exit(1)
@@ -45,7 +44,7 @@ except Exception as e:
 def is_owner(uid):
     return str(uid) == str(OWNER_ID)
 
-# --- Email Logic ---
+# --- Email Send Task ---
 async def send_mail_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id): return
     
@@ -55,7 +54,7 @@ async def send_mail_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ ডাটাবেজে কোনো ইমেইল নেই।")
         return
 
-    # --- আপনার তথ্য এখানে দিন (পরবর্তীতে এডিট করতে পারবেন) ---
+    # --- আপনার তথ্যসমূহ ---
     WA_LINK = "https://wa.me/8801700000000" 
     TG_LINK = "https://t.me/your_username"   
     WEB_LINK = "https://yourwebsite.com"    
@@ -67,23 +66,19 @@ async def send_mail_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     <html>
       <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
         <h2 style="color: #1a73e8;">Hello {{dev_name}},</h2>
-        <p>I hope you're doing well. I recently found your app <b>"{{app_name}}"</b> on the Play Store.</p>
-        <p>I specialize in <b>App Store Optimization (ASO)</b> and <b>Review Services</b>. I can help your app get high-quality ratings and authentic reviews, which will significantly improve your ranking and user trust.</p>
-        
+        <p>I found your app <b>"{{app_name}}"</b> on the Play Store. It has great potential!</p>
+        <p>I specialize in <b>App Store Optimization (ASO)</b> and can help you get authentic reviews and higher rankings.</p>
         <div style="background: #f1f3f4; padding: 15px; border-radius: 10px; border: 1px solid #ddd;">
-          <p><b>Interested? Let's discuss further:</b></p>
           <p>✅ <b>WhatsApp:</b> <a href="{WA_LINK}">Chat Now</a></p>
-          <p>✅ <b>Telegram:</b> <a href="{TG_LINK}">Contact via Telegram</a></p>
-          <p>✅ <b>Website:</b> <a href="{WEB_LINK}">Visit Our Portfolio</a></p>
+          <p>✅ <b>Telegram:</b> <a href="{TG_LINK}">Contact Now</a></p>
+          <p>✅ <b>Website:</b> <a href="{WEB_LINK}">Our Portfolio</a></p>
         </div>
-        <br>
-        <p>Looking forward to working with you!</p>
-        <p>Best Regards,<br><b>{MY_NAME}</b></p>
+        <br><p>Best Regards,<br><b>{MY_NAME}</b></p>
       </body>
     </html>
     """
 
-    await update.message.reply_text("🚀 ইমেইল ক্যাম্পেইন শুরু হয়েছে...")
+    await update.message.reply_text("🚀 ইমেইল পাঠানো শুরু হচ্ছে...")
     sent_count = 0
 
     for key, info in data.items():
@@ -100,18 +95,19 @@ async def send_mail_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg.add_alternative(html_template.format(app_name=app_name, dev_name=dev_name), subtype='html')
 
         try:
+            # SMTP কানেকশন লুপের ভেতরে রাখাই ভালো যেন কানেকশন ড্রপ না হয়
             with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
                 smtp.login(EMAIL_USER, EMAIL_PASS)
                 smtp.send_message(msg)
             
             ref.child(key).update({'sent': True, 'sent_at': datetime.now().isoformat()})
             sent_count += 1
-            await asyncio.sleep(5) # নিরাপত্তা বিরতি
+            await asyncio.sleep(5) # ৫ সেকেন্ড গ্যাপ
 
             if sent_count % 10 == 0:
-                await update.message.reply_text(f"📈 স্ট্যাটাস: {sent_count}টি ইমেইল পাঠানো সম্পন্ন।")
+                await update.message.reply_text(f"📈 স্ট্যাটাস: {sent_count}টি পাঠানো হয়েছে।")
         except Exception as e:
-            logger.error(f"Error for {recipient_email}: {e}")
+            logger.error(f"Error sending to {recipient_email}: {e}")
             continue
 
     await update.message.reply_text(f"✅ সম্পন্ন! মোট {sent_count}টি ইমেইল পাঠানো হয়েছে।")
@@ -125,42 +121,43 @@ async def export_sent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     si = io.StringIO()
     cw = csv.writer(si)
     cw.writerow(['App Name', 'Email', 'Sent At'])
-    
     for v in data.values():
         if v.get('sent') == True:
             cw.writerow([v.get('app_name'), v.get('email'), v.get('sent_at')])
 
     output = io.BytesIO(si.getvalue().encode())
     output.name = f"Sent_List_{datetime.now().strftime('%d_%m')}.csv"
-    await update.message.reply_document(document=output, caption="📊 সফলভাবে পাঠানো ইমেইলের লিস্ট।")
+    await update.message.reply_document(document=output, caption="📊 সফল ইমেইল লিস্ট।")
 
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if is_owner(u.effective_user.id):
-        await u.message.reply_text("বট অনলাইন! \n/send_emails দিয়ে কাজ শুরু করুন।")
+        await u.message.reply_text("বট অনলাইন! \n/send_emails - ইমেইল পাঠাতে \n/export_sent - লিস্ট পেতে")
 
 def main():
     if not TOKEN:
         logger.error("No Bot Token found!")
-        return
+        sys.exit(1)
 
-    app = Application.builder().token(TOKEN).build()
+    # v21.x এর জন্য ApplicationBuilder ব্যবহার
+    application = Application.builder().token(TOKEN).build()
     
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("send_emails", send_mail_task))
-    app.add_handler(CommandHandler("export_sent", export_sent))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("send_emails", send_mail_task))
+    application.add_handler(CommandHandler("export_sent", export_sent))
 
-    # Render Deployment (Port 10000 binding)
     if RENDER_URL:
+        # Render এর জন্য Webhook
         logger.info(f"Starting Webhook on port {PORT}")
-        app.run_webhook(
+        application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
             url_path=TOKEN,
-            webhook_url=f"{RENDER_URL}/{TOKEN}"
+            webhook_url=f"{RENDER_URL}/{TOKEN}",
+            drop_pending_updates=True
         )
     else:
-        logger.info("Starting Polling (Local Mode)")
-        app.run_polling()
+        # লোকাল পিসির জন্য Polling
+        application.run_polling()
 
 if __name__ == "__main__":
     main()
