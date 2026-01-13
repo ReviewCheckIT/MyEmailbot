@@ -55,10 +55,10 @@ async def send_mail_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # --- আপনার তথ্যসমূহ ---
-    WA_LINK = "https://wa.me/8801700000000" 
-    TG_LINK = "https://t.me/your_username"   
-    WEB_LINK = "https://yourwebsite.com"    
-    MY_NAME = "Your Name/Agency"        
+    WA_LINK = "https://wa.me/message/4TY7FZQW5ADQF1" 
+    TG_LINK = "https://t.me/Rifat8289"   
+    WEB_LINK = "https://brotheritltd.com"    
+    MY_NAME = "MD SHAKIL"        
 
     subject_template = "Boost Your App Ranking & Reviews: {app_name}"
     
