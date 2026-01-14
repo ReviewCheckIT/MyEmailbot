@@ -24,10 +24,8 @@ FB_URL = os.environ.get('FIREBASE_DATABASE_URL')
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
 PORT = int(os.environ.get('PORT', '10000'))
 
-# Mailjet Credentials from Render Env
-MJ_API_KEY = os.environ.get('MJ_API_KEY')
-MJ_API_SECRET = os.environ.get('MJ_API_SECRET')
-SENDER_EMAIL = os.environ.get('EMAIL_USER') # আপনার ভেরিফাইড জিমেইল
+# Google Apps Script Web App URL (Render-এ GAS_URL নামে সেভ করুন অথবা এখানে সরাসরি বসান)
+GAS_URL = os.environ.get('GAS_URL') # https://script.google.com/macros/s/.../exec
 
 # --- Global Control ---
 IS_SENDING = False
@@ -38,57 +36,41 @@ try:
         cred_dict = json.loads(FB_JSON)
         cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred, {'databaseURL': FB_URL})
-    logger.info("🔥 Firebase Connected Successfully!")
+    logger.info("🔥 Firebase Connected!")
 except Exception as e:
     logger.error(f"❌ Firebase Error: {e}")
 
 def is_owner(uid):
     return str(uid) == str(OWNER_ID)
 
-# --- Error Handler ---
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error(msg="Exception while handling an update:", exc_info=context.error)
-    if OWNER_ID:
-        try:
-            await context.bot.send_message(chat_id=OWNER_ID, text=f"⚠️ এরর: `{context.error}`")
-        except: pass
-
-# --- Mailjet API Function (Stable HTTP Method) ---
-def send_email_via_api(to_email, subject, body_html):
+# --- Send via Google Apps Script (HTTP Request) ---
+def send_email_via_gas(to_email, subject, body_html):
     try:
-        url = "https://api.mailjet.com/v3.1/send"
-        auth = (MJ_API_KEY, MJ_API_SECRET)
-        data = {
-            'Messages': [
-                {
-                    "From": {
-                        "Email": SENDER_EMAIL,
-                        "Name": "App Growth Specialist"
-                    },
-                    "To": [{"Email": to_email}],
-                    "Subject": subject,
-                    "HTMLPart": body_html
-                }
-            ]
+        payload = {
+            "to": to_email,
+            "subject": subject,
+            "body": body_html
         }
-        response = requests.post(url, auth=auth, json=data, timeout=25)
+        # গুগল স্ক্রিপ্টে রিকোয়েস্ট পাঠানো
+        response = requests.post(GAS_URL, json=payload, timeout=30)
         if response.status_code == 200:
-            return True
+            result = response.json()
+            return result.get("status") == "success"
         else:
-            logger.error(f"❌ Mailjet API Error: {response.status_code} - {response.text}")
+            logger.error(f"GAS Error Status: {response.status_code}")
             return False
     except Exception as e:
-        logger.error(f"❌ API Connection Error: {e}")
+        logger.error(f"❌ GAS Connection Error: {e}")
         return False
 
-# --- Human-like Background Processor ---
+# --- Background Human-like Processor ---
 async def process_email_queue(context: ContextTypes.DEFAULT_TYPE):
     global IS_SENDING
     chat_id = context.job.chat_id
     
     config = db.reference('email_config').get()
     if not config or 'subject' not in config:
-        await context.bot.send_message(chat_id, "⚠️ ইমেইল কন্টেন্ট সেট করা নেই! /set_content ব্যবহার করুন।")
+        await context.bot.send_message(chat_id, "⚠️ Content set করা নেই!")
         IS_SENDING = False
         return
 
@@ -96,12 +78,12 @@ async def process_email_queue(context: ContextTypes.DEFAULT_TYPE):
     all_leads = ref.get()
 
     if not all_leads:
-        await context.bot.send_message(chat_id, "❌ ডাটাবেজে কোনো ইমেল খুঁজে পাওয়া যায়নি।")
+        await context.bot.send_message(chat_id, "❌ ডাটাবেজে লিড নেই।")
         IS_SENDING = False
         return
 
     count = 0
-    await context.bot.send_message(chat_id, "🚀 API-র মাধ্যমে ইমেইল পাঠানো শুরু হয়েছে। এটি মানুষের মতো ধীরগতিতে কাজ করবে।")
+    await context.bot.send_message(chat_id, "🚀 Google Apps Script এর মাধ্যমে মানুষের মতো পাঠানো শুরু হয়েছে।")
 
     for key, data in all_leads.items():
         if not IS_SENDING: break
@@ -109,90 +91,81 @@ async def process_email_queue(context: ContextTypes.DEFAULT_TYPE):
 
         email = data.get('email')
         app_name = data.get('app_name', 'Developer')
-        # সাবজেক্ট এবং বডিতে {app_name} রিপ্লেস করা
+        
         final_subject = config['subject'].replace('{app_name}', app_name)
         final_body = config['body'].replace('{app_name}', app_name)
 
-        if send_email_via_api(email, final_subject, final_body):
+        if send_email_via_gas(email, final_subject, final_body):
             ref.child(key).update({
                 'status': 'sent', 
                 'sent_at': datetime.now().isoformat(),
-                'sender_used': SENDER_EMAIL
+                'method': 'google_script'
             })
             count += 1
             if count % 10 == 0:
                 await context.bot.send_message(chat_id, f"✅ সফলভাবে {count} টি পাঠানো হয়েছে।")
-                # প্রতি ১০টি মেইল পর মানুষের মতো ২ মিনিটের লম্বা বিরতি
-                await asyncio.sleep(random.randint(120, 180))
+                await asyncio.sleep(random.randint(60, 120))
         
-        # প্রতি মেইলের মাঝে ৩০ থেকে ৯০ সেকেন্ডের র‍্যান্ডম গ্যাপ
-        await asyncio.sleep(random.randint(30, 90))
+        # প্রতিটি মেইলের মাঝে ৩০-৬০ সেকেন্ডের হিউম্যান গ্যাপ
+        await asyncio.sleep(random.randint(30, 60))
 
     IS_SENDING = False
-    await context.bot.send_message(chat_id, f"🏁 কাজ শেষ! এই সেশনে মোট পাঠানো হয়েছে: {count}")
+    await context.bot.send_message(chat_id, f"🏁 কাজ শেষ! সেশনে পাঠানো হয়েছে: {count}")
 
-# --- Handlers ---
+# --- Commands ---
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(u.effective_user.id): return
-    await u.message.reply_text("🤖 API ইমেইল বট অনলাইন।\n\n/set_content - কন্টেন্ট সেট করুন\n/start_sending - পাঠানো শুরু\n/stop_sending - থামানো\n/stats - বর্তমান অবস্থা")
+    if is_owner(u.effective_user.id):
+        await u.message.reply_text("🤖 Google Script Bot Online!\n/set_content\n/start_sending\n/stats")
 
 async def stats(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not is_owner(u.effective_user.id): return
     leads = db.reference('scraped_emails').get() or {}
     total = len(leads)
     sent = sum(1 for v in leads.values() if v.get('status') == 'sent')
-    await u.message.reply_text(f"📊 মোট ইমেইল: {total}\n✅ পাঠানো হয়েছে: {sent}\n⏳ বাকি আছে: {total-sent}")
+    await u.message.reply_text(f"📊 মোট: {total}\n✅ পাঠানো: {sent}\n⏳ বাকি: {total-sent}")
 
 async def start_sending(u: Update, c: ContextTypes.DEFAULT_TYPE):
     global IS_SENDING
     if not is_owner(u.effective_user.id): return
     if IS_SENDING:
-        await u.message.reply_text("⚠️ অলরেডি ইমেইল পাঠানো হচ্ছে।")
+        await u.message.reply_text("⚠️ অলরেডি পাঠানো হচ্ছে।")
         return
     IS_SENDING = True
     c.job_queue.run_once(process_email_queue, 1, chat_id=u.effective_chat.id)
-    await u.message.reply_text("🚀 কিউতে যুক্ত করা হয়েছে। কাজ শুরু হচ্ছে...")
+    await u.message.reply_text("🚀 কিউতে যুক্ত করা হয়েছে।")
 
 async def stop_sending(u: Update, c: ContextTypes.DEFAULT_TYPE):
     global IS_SENDING
     if not is_owner(u.effective_user.id): return
     IS_SENDING = False
-    await u.message.reply_text("🛑 পাঠানো বন্ধ করা হচ্ছে (বর্তমান মেইলটি পাঠানোর পর থেমে যাবে)।")
+    await u.message.reply_text("🛑 থামানো হচ্ছে...")
 
-# --- Conversation for Content ---
+# --- Conversation ---
 SUBJECT, BODY = range(2)
 async def set_c(u, c): 
     if not is_owner(u.effective_user.id): return
-    await u.message.reply_text("ইমেইল সাবজেক্ট (Subject) দিন:")
-    return SUBJECT
+    await u.message.reply_text("Subject:"); return SUBJECT
 async def set_s(u, c):
-    c.user_data['temp_s'] = u.message.text
-    await u.message.reply_text("ইমেইল বডি (HTML Body) দিন:")
-    return BODY
+    c.user_data['ts'] = u.message.text
+    await u.message.reply_text("Body (HTML):"); return BODY
 async def set_b(u, c):
-    db.reference('email_config').set({'subject': c.user_data['temp_s'], 'body': u.message.text})
-    await u.message.reply_text("✅ টেমপ্লেট সফলভাবে সেভ হয়েছে।")
-    return ConversationHandler.END
+    db.reference('email_config').set({'subject': c.user_data['ts'], 'body': u.message.text})
+    await u.message.reply_text("✅ Saved!"); return ConversationHandler.END
 
 def main():
     app = Application.builder().token(TOKEN).build()
-    
-    app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("start_sending", start_sending))
     app.add_handler(CommandHandler("stop_sending", stop_sending))
-    
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler('set_content', set_c)],
         states={SUBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_s)],
                 BODY: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_b)]},
-        fallbacks=[CommandHandler('cancel', lambda u,c: ConversationHandler.END)]
+        fallbacks=[]
     ))
-
     if RENDER_URL:
-        app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN[-10:], 
-                        webhook_url=f"{RENDER_URL}/{TOKEN[-10:]}")
+        app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN[-10:], webhook_url=f"{RENDER_URL}/{TOKEN[-10:]}")
     else:
         app.run_polling()
 
