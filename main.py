@@ -3,7 +3,7 @@ import logging
 import os
 import json
 import asyncio
-import requests # API কল করার জন্য
+import requests # এটি নতুন যুক্ত হয়েছে API এর জন্য
 import csv
 import io
 import sys
@@ -18,12 +18,13 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Env Variables (Render-এ সেট করবেন) ---
+# --- Env Variables ---
 TOKEN = os.environ.get('EMAIL_BOT_TOKEN') 
 OWNER_ID = os.environ.get('BOT_OWNER_ID')
 FB_JSON = os.environ.get('FIREBASE_CREDENTIALS_JSON')
 FB_URL = os.environ.get('FIREBASE_DATABASE_URL')
-MAILTRAP_API_TOKEN = os.environ.get('MAILTRAP_API_TOKEN') # 23b3c7053f8b34fbff24b54fdf04315f
+# জিমেইল পাসওয়ার্ডের বদলে এখন Mailtrap API Token ব্যবহার হবে
+MAILTRAP_API_TOKEN = os.environ.get('MAILTRAP_API_TOKEN') 
 
 PORT = int(os.environ.get('PORT', '10000'))
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
@@ -42,44 +43,6 @@ except Exception as e:
 def is_owner(uid):
     return str(uid) == str(OWNER_ID)
 
-# --- Mailtrap API Sending Logic ---
-def send_via_mailtrap_api(to_email, dev_name, app_name):
-    url = "https://send.api.mailtrap.io/api/send"
-    
-    # আপনার সার্ভিস সম্পর্কে প্রফেশনাল টেক্সট
-    wa_link = "https://wa.me/8801647323233" # এখানে আপনার নাম্বার দিন
-    tg_link = "https://t.me/t.me/AfMdshakil"   # আপনার টেলিগ্রাম দিন
-
-    html_content = f"""
-    <html>
-      <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-        <h2>Hello {dev_name},</h2>
-        <p>I found your app <b>"{app_name}"</b> on the Play Store. It has great potential!</p>
-        <p>I provide professional <b>App Review & Ranking Services</b>. I can help your app get high-quality ratings and authentic reviews to boost user trust and search ranking.</p>
-        <p><b>Contact Me:</b><br>
-        WhatsApp: <a href="{wa_link}">Chat Now</a><br>
-        Telegram: <a href="{tg_link}">Send Message</a></p>
-        <p>Best Regards,<br>App Marketing Specialist</p>
-      </body>
-    </html>
-    """
-
-    payload = {
-        "from": {"email": "hello@demomailtrap.co", "name": "App Services"},
-        "to": [{"email": to_email}],
-        "subject": f"Boost Your App Ranking: {app_name}",
-        "html": html_content,
-        "category": "App Marketing"
-    }
-
-    headers = {
-        "Authorization": f"Bearer {MAILTRAP_API_TOKEN}",
-        "Content-Type": application/json
-    }
-
-    response = requests.post(url, json=payload, headers=headers)
-    return response
-
 # --- Email Send Task ---
 async def send_mail_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id): return
@@ -90,7 +53,12 @@ async def send_mail_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ ডাটাবেজে কোনো ইমেইল নেই।")
         return
 
-    await update.message.reply_text("🚀 Mailtrap API এর মাধ্যমে ইমেইল পাঠানো শুরু হচ্ছে...")
+    # --- আপনার তথ্যসমূহ ---
+    WA_LINK = "https://wa.me/88016323233" 
+    TG_LINK = "https://t.me/t.me/AfMdshakil"   
+    MY_NAME = "Your Name/MD.SHAKIL"        
+
+    await update.message.reply_text("🚀 ইমেইল ক্যাম্পেইন শুরু হচ্ছে (Mailtrap API)...")
     sent_count = 0
 
     for key, info in data.items():
@@ -100,38 +68,96 @@ async def send_mail_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         app_name = info.get('app_name', 'Your App')
         dev_name = info.get('dev', 'Developer')
 
+        # API Payload তৈরি
+        url = "https://send.api.mailtrap.io/api/send"
+        
+        payload = {
+            "from": {"email": "hello@demomailtrap.co", "name": "App Services"},
+            "to": [{"email": recipient_email}],
+            "subject": f"Boost Your App Ranking & Reviews: {app_name}",
+            "html": f"""
+            <html>
+              <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                <h2 style="color: #1a73e8;">Hello {dev_name},</h2>
+                <p>I found your app <b>"{app_name}"</b> on the Play Store. It has great potential!</p>
+                <p>I specialize in <b>App Store Optimization (ASO)</b> and can help you get authentic reviews and higher rankings.</p>
+                <div style="background: #f1f3f4; padding: 15px; border-radius: 10px; border: 1px solid #ddd;">
+                  <p>✅ <b>WhatsApp:</b> <a href="{WA_LINK}">Chat Now</a></p>
+                  <p>✅ <b>Telegram:</b> <a href="{TG_LINK}">Contact Now</a></p>
+                </div>
+                <br><p>Best Regards,<br><b>{MY_NAME}</b></p>
+              </body>
+            </html>
+            """,
+            "category": "App Marketing"
+        }
+
+        headers = {
+            "Authorization": f"Bearer {MAILTRAP_API_TOKEN}",
+            "Content-Type": "application/json"
+        }
+
         try:
-            res = send_via_mailtrap_api(recipient_email, dev_name, app_name)
+            # API এর মাধ্যমে মেইল পাঠানো
+            response = requests.post(url, json=payload, headers=headers)
             
-            if res.status_code == 200:
+            if response.status_code == 200 or response.status_code == 202:
                 ref.child(key).update({'sent': True, 'sent_at': datetime.now().isoformat()})
                 sent_count += 1
                 await update.message.reply_text(f"✅ পাঠানো হয়েছে: {recipient_email}")
             else:
-                logger.error(f"API Error: {res.text}")
-
-            await asyncio.sleep(2) # API ব্যবহারে সময় কম লাগে, তাই ২ সেকেন্ড গ্যাপই যথেষ্ট
+                logger.error(f"Mailtrap Error: {response.text}")
+                await update.message.reply_text(f"⚠️ ব্যর্থ: {recipient_email} (Status: {response.status_code})")
+            
+            await asyncio.sleep(2) # API এর জন্য ২ সেকেন্ড বিরতিই যথেষ্ট
 
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.error(f"Error for {recipient_email}: {e}")
             continue
 
-    await update.message.reply_text(f"🏁 সম্পন্ন! মোট {sent_count}টি ইমেইল পাঠানো হয়েছে।")
+    await update.message.reply_text(f"🏁 কাজ শেষ! মোট {sent_count}টি ইমেইল পাঠানো হয়েছে।")
 
-# --- Commands ---
+# --- Export & Stats ---
+async def export_sent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id): return
+    data = db.reference('scraped_emails').get()
+    if not data: return
+
+    si = io.StringIO()
+    cw = csv.writer(si)
+    cw.writerow(['App Name', 'Email', 'Sent At'])
+    for v in data.values():
+        if v.get('sent') == True:
+            cw.writerow([v.get('app_name'), v.get('email'), v.get('sent_at')])
+
+    output = io.BytesIO(si.getvalue().encode())
+    output.name = f"Sent_List_{datetime.now().strftime('%d_%m')}.csv"
+    await update.message.reply_document(document=output, caption="📊 সফল ইমেইল লিস্ট।")
+
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if is_owner(u.effective_user.id):
-        await u.message.reply_text("বট অনলাইন! ইমেইল পাঠাতে /send_emails কমান্ড দিন।")
+        await u.message.reply_text("বট অনলাইন! \n/send_emails - ইমেইল পাঠাতে \n/export_sent - লিস্ট পেতে")
 
 def main():
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("send_emails", send_mail_task))
+    if not TOKEN:
+        sys.exit(1)
+
+    application = Application.builder().token(TOKEN).build()
+    
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("send_emails", send_mail_task))
+    application.add_handler(CommandHandler("export_sent", export_sent))
 
     if RENDER_URL:
-        app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN, webhook_url=f"{RENDER_URL}/{TOKEN}")
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TOKEN,
+            webhook_url=f"{RENDER_URL}/{TOKEN}",
+            drop_pending_updates=True
+        )
     else:
-        app.run_polling()
+        application.run_polling()
 
 if __name__ == "__main__":
     main()
