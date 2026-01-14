@@ -3,10 +3,8 @@ import logging
 import os
 import json
 import asyncio
-import smtplib
 import random
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import requests
 from datetime import datetime
 
 from telegram import Update
@@ -26,8 +24,10 @@ FB_URL = os.environ.get('FIREBASE_DATABASE_URL')
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
 PORT = int(os.environ.get('PORT', '10000'))
 
-EMAIL_USER = os.environ.get('EMAIL_USER') 
-EMAIL_PASS = os.environ.get('EMAIL_PASS')
+# Mailjet Credentials from Render Env
+MJ_API_KEY = os.environ.get('MJ_API_KEY')
+MJ_API_SECRET = os.environ.get('MJ_API_SECRET')
+SENDER_EMAIL = os.environ.get('EMAIL_USER') # আপনার ভেরিফাইড জিমেইল
 
 # --- Global Control ---
 IS_SENDING = False
@@ -38,7 +38,7 @@ try:
         cred_dict = json.loads(FB_JSON)
         cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred, {'databaseURL': FB_URL})
-    logger.info("🔥 Firebase Connected!")
+    logger.info("🔥 Firebase Connected Successfully!")
 except Exception as e:
     logger.error(f"❌ Firebase Error: {e}")
 
@@ -50,37 +50,45 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
     if OWNER_ID:
         try:
-            await context.bot.send_message(chat_id=OWNER_ID, text=f"⚠️ এরর ধরা পড়েছে: `{context.error}`")
+            await context.bot.send_message(chat_id=OWNER_ID, text=f"⚠️ এরর: `{context.error}`")
         except: pass
 
-# --- Safe Email Function (Human Style & Stable Connection) ---
-def send_email_human_style(to_email, subject, body_html):
+# --- Mailjet API Function (Stable HTTP Method) ---
+def send_email_via_api(to_email, subject, body_html):
     try:
-        msg = MIMEMultipart()
-        msg['From'] = f"Support <{EMAIL_USER}>"
-        msg['To'] = to_email
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body_html, 'html'))
-
-        # Port 587 and STARTTLS is often more stable on cloud environments
-        server = smtplib.SMTP('smtp.gmail.com', 587, timeout=30)
-        server.starttls() 
-        server.login(EMAIL_USER, EMAIL_PASS)
-        server.sendmail(EMAIL_USER, to_email, msg.as_string())
-        server.quit()
-        return True
+        url = "https://api.mailjet.com/v3.1/send"
+        auth = (MJ_API_KEY, MJ_API_SECRET)
+        data = {
+            'Messages': [
+                {
+                    "From": {
+                        "Email": SENDER_EMAIL,
+                        "Name": "App Growth Specialist"
+                    },
+                    "To": [{"Email": to_email}],
+                    "Subject": subject,
+                    "HTMLPart": body_html
+                }
+            ]
+        }
+        response = requests.post(url, auth=auth, json=data, timeout=25)
+        if response.status_code == 200:
+            return True
+        else:
+            logger.error(f"❌ Mailjet API Error: {response.status_code} - {response.text}")
+            return False
     except Exception as e:
-        logger.error(f"❌ Email Failed to {to_email}: {e}")
+        logger.error(f"❌ API Connection Error: {e}")
         return False
 
-# --- Background Task: Human-like Processor ---
+# --- Human-like Background Processor ---
 async def process_email_queue(context: ContextTypes.DEFAULT_TYPE):
     global IS_SENDING
     chat_id = context.job.chat_id
     
     config = db.reference('email_config').get()
     if not config or 'subject' not in config:
-        await context.bot.send_message(chat_id, "⚠️ ইমেইল টেমপ্লেট সেট করা নেই! /set_content ব্যবহার করুন।")
+        await context.bot.send_message(chat_id, "⚠️ ইমেইল কন্টেন্ট সেট করা নেই! /set_content ব্যবহার করুন।")
         IS_SENDING = False
         return
 
@@ -88,12 +96,12 @@ async def process_email_queue(context: ContextTypes.DEFAULT_TYPE):
     all_leads = ref.get()
 
     if not all_leads:
-        await context.bot.send_message(chat_id, "❌ ডাটাবেজে কোনো লিড নেই।")
+        await context.bot.send_message(chat_id, "❌ ডাটাবেজে কোনো ইমেল খুঁজে পাওয়া যায়নি।")
         IS_SENDING = False
         return
 
     count = 0
-    await context.bot.send_message(chat_id, "🚀 মানুষের মতো ইমেইল পাঠানো শুরু হয়েছে।")
+    await context.bot.send_message(chat_id, "🚀 API-র মাধ্যমে ইমেইল পাঠানো শুরু হয়েছে। এটি মানুষের মতো ধীরগতিতে কাজ করবে।")
 
     for key, data in all_leads.items():
         if not IS_SENDING: break
@@ -101,79 +109,72 @@ async def process_email_queue(context: ContextTypes.DEFAULT_TYPE):
 
         email = data.get('email')
         app_name = data.get('app_name', 'Developer')
+        # সাবজেক্ট এবং বডিতে {app_name} রিপ্লেস করা
+        final_subject = config['subject'].replace('{app_name}', app_name)
         final_body = config['body'].replace('{app_name}', app_name)
 
-        if send_email_human_style(email, config['subject'], final_body):
+        if send_email_via_api(email, final_subject, final_body):
             ref.child(key).update({
                 'status': 'sent', 
                 'sent_at': datetime.now().isoformat(),
-                'sender': EMAIL_USER
+                'sender_used': SENDER_EMAIL
             })
             count += 1
             if count % 10 == 0:
                 await context.bot.send_message(chat_id, f"✅ সফলভাবে {count} টি পাঠানো হয়েছে।")
-                # প্রতি ১০ মেইল পর ১-৩ মিনিটের বড় গ্যাপ
-                await asyncio.sleep(random.randint(60, 180))
+                # প্রতি ১০টি মেইল পর মানুষের মতো ২ মিনিটের লম্বা বিরতি
+                await asyncio.sleep(random.randint(120, 180))
         
-        # প্রতিটি মেইলের মাঝে মানুষের মতো ৩০-৯০ সেকেন্ডের গ্যাপ
+        # প্রতি মেইলের মাঝে ৩০ থেকে ৯০ সেকেন্ডের র‍্যান্ডম গ্যাপ
         await asyncio.sleep(random.randint(30, 90))
 
     IS_SENDING = False
-    await context.bot.send_message(chat_id, f"🏁 কাজ শেষ! সেশনে পাঠানো হয়েছে: {count}")
+    await context.bot.send_message(chat_id, f"🏁 কাজ শেষ! এই সেশনে মোট পাঠানো হয়েছে: {count}")
 
-# --- Command Handlers ---
+# --- Handlers ---
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not is_owner(u.effective_user.id): return
-    await u.message.reply_text("🤖 ইমেইল বট অনলাইন।\n\n/set_content - ইমেইল লিখুন\n/check_content - বর্তমান ইমেইল দেখুন\n/start_sending - পাঠানো শুরু\n/stop_sending - থামানো\n/stats - ডাটাবেজ অবস্থা")
+    await u.message.reply_text("🤖 API ইমেইল বট অনলাইন।\n\n/set_content - কন্টেন্ট সেট করুন\n/start_sending - পাঠানো শুরু\n/stop_sending - থামানো\n/stats - বর্তমান অবস্থা")
 
 async def stats(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not is_owner(u.effective_user.id): return
     leads = db.reference('scraped_emails').get() or {}
     total = len(leads)
     sent = sum(1 for v in leads.values() if v.get('status') == 'sent')
-    await u.message.reply_text(f"📊 মোট লিড: {total}\n✅ পাঠানো হয়েছে: {sent}\n⏳ বাকি আছে: {total-sent}")
+    await u.message.reply_text(f"📊 মোট ইমেইল: {total}\n✅ পাঠানো হয়েছে: {sent}\n⏳ বাকি আছে: {total-sent}")
 
 async def start_sending(u: Update, c: ContextTypes.DEFAULT_TYPE):
     global IS_SENDING
     if not is_owner(u.effective_user.id): return
     if IS_SENDING:
-        await u.message.reply_text("⚠️ অলরেডি প্রসেস চলছে।")
+        await u.message.reply_text("⚠️ অলরেডি ইমেইল পাঠানো হচ্ছে।")
         return
     IS_SENDING = True
     c.job_queue.run_once(process_email_queue, 1, chat_id=u.effective_chat.id)
-    await u.message.reply_text("🚀 কিউতে যুক্ত করা হয়েছে। পাঠানো শুরু হচ্ছে।")
+    await u.message.reply_text("🚀 কিউতে যুক্ত করা হয়েছে। কাজ শুরু হচ্ছে...")
 
 async def stop_sending(u: Update, c: ContextTypes.DEFAULT_TYPE):
     global IS_SENDING
     if not is_owner(u.effective_user.id): return
     IS_SENDING = False
-    await u.message.reply_text("🛑 প্রসেস থামানো হচ্ছে...")
+    await u.message.reply_text("🛑 পাঠানো বন্ধ করা হচ্ছে (বর্তমান মেইলটি পাঠানোর পর থেমে যাবে)।")
 
-# --- Conversation Handler (Content Setup) ---
+# --- Conversation for Content ---
 SUBJECT, BODY = range(2)
 async def set_c(u, c): 
     if not is_owner(u.effective_user.id): return
-    await u.message.reply_text("ইমেইলের সাবজেক্ট (Subject) দিন:")
+    await u.message.reply_text("ইমেইল সাবজেক্ট (Subject) দিন:")
     return SUBJECT
 async def set_s(u, c):
     c.user_data['temp_s'] = u.message.text
-    await u.message.reply_text("ইমেইলের বডি (HTML Body) দিন:")
+    await u.message.reply_text("ইমেইল বডি (HTML Body) দিন:")
     return BODY
 async def set_b(u, c):
     db.reference('email_config').set({'subject': c.user_data['temp_s'], 'body': u.message.text})
-    await u.message.reply_text("✅ টেমপ্লেট সেভ হয়েছে।")
+    await u.message.reply_text("✅ টেমপ্লেট সফলভাবে সেভ হয়েছে।")
     return ConversationHandler.END
 
-async def check_content(u, c):
-    if not is_owner(u.effective_user.id): return
-    cfg = db.reference('email_config').get()
-    if cfg:
-        await u.message.reply_text(f"📝 সাবজেক্ট: {cfg['subject']}\n\n📄 বডি:\n{cfg['body']}")
-    else:
-        await u.message.reply_text("⚠️ কিছু সেট করা নেই।")
-
 def main():
-    # Build Application with JobQueue support
     app = Application.builder().token(TOKEN).build()
     
     app.add_error_handler(error_handler)
@@ -181,7 +182,6 @@ def main():
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("start_sending", start_sending))
     app.add_handler(CommandHandler("stop_sending", stop_sending))
-    app.add_handler(CommandHandler("check_content", check_content))
     
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler('set_content', set_c)],
@@ -191,7 +191,6 @@ def main():
     ))
 
     if RENDER_URL:
-        # Webhook setup for Render
         app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN[-10:], 
                         webhook_url=f"{RENDER_URL}/{TOKEN[-10:]}")
     else:
