@@ -38,7 +38,7 @@ try:
         cred_dict = json.loads(FB_JSON)
         cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred, {'databaseURL': FB_URL})
-    logger.info("🔥 Firebase Connected Successfully!")
+    logger.info("🔥 Firebase Connected!")
 except Exception as e:
     logger.error(f"❌ Firebase Error: {e}")
 
@@ -48,12 +48,12 @@ def is_owner(uid):
 # --- Error Handler ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
-    if is_owner(update.effective_user.id if update else OWNER_ID):
+    if OWNER_ID:
         try:
             await context.bot.send_message(chat_id=OWNER_ID, text=f"⚠️ এরর ধরা পড়েছে: `{context.error}`")
         except: pass
 
-# --- Safe Email Function (Human Like) ---
+# --- Safe Email Function (Human Style & Stable Connection) ---
 def send_email_human_style(to_email, subject, body_html):
     try:
         msg = MIMEMultipart()
@@ -62,7 +62,9 @@ def send_email_human_style(to_email, subject, body_html):
         msg['Subject'] = subject
         msg.attach(MIMEText(body_html, 'html'))
 
-        server = smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=20)
+        # Port 587 and STARTTLS is often more stable on cloud environments
+        server = smtplib.SMTP('smtp.gmail.com', 587, timeout=30)
+        server.starttls() 
         server.login(EMAIL_USER, EMAIL_PASS)
         server.sendmail(EMAIL_USER, to_email, msg.as_string())
         server.quit()
@@ -91,7 +93,7 @@ async def process_email_queue(context: ContextTypes.DEFAULT_TYPE):
         return
 
     count = 0
-    await context.bot.send_message(chat_id, "🚀 মানুষের মতো ইমেইল পাঠানো শুরু হয়েছে। প্রতি মেইলের মাঝে বড় গ্যাপ থাকবে।")
+    await context.bot.send_message(chat_id, "🚀 মানুষের মতো ইমেইল পাঠানো শুরু হয়েছে।")
 
     for key, data in all_leads.items():
         if not IS_SENDING: break
@@ -101,7 +103,6 @@ async def process_email_queue(context: ContextTypes.DEFAULT_TYPE):
         app_name = data.get('app_name', 'Developer')
         final_body = config['body'].replace('{app_name}', app_name)
 
-        # ইমেইল পাঠানো
         if send_email_human_style(email, config['subject'], final_body):
             ref.child(key).update({
                 'status': 'sent', 
@@ -111,18 +112,16 @@ async def process_email_queue(context: ContextTypes.DEFAULT_TYPE):
             count += 1
             if count % 10 == 0:
                 await context.bot.send_message(chat_id, f"✅ সফলভাবে {count} টি পাঠানো হয়েছে।")
-                # প্রতি ১০টি মেইল পর ১-২ মিনিটের লম্বা বিরতি (মানুষের মতো বিরতি)
-                long_sleep = random.randint(60, 120)
-                await asyncio.sleep(long_sleep)
+                # প্রতি ১০ মেইল পর ১-৩ মিনিটের বড় গ্যাপ
+                await asyncio.sleep(random.randint(60, 180))
         
-        # সাধারণ বিরতি (১০ থেকে ৩০ সেকেন্ড)
-        normal_sleep = random.randint(15, 45)
-        await asyncio.sleep(normal_sleep)
+        # প্রতিটি মেইলের মাঝে মানুষের মতো ৩০-৯০ সেকেন্ডের গ্যাপ
+        await asyncio.sleep(random.randint(30, 90))
 
     IS_SENDING = False
-    await context.bot.send_message(chat_id, f"🏁 কাজ শেষ! এই সেশনে মোট পাঠানো হয়েছে: {count}")
+    await context.bot.send_message(chat_id, f"🏁 কাজ শেষ! সেশনে পাঠানো হয়েছে: {count}")
 
-# --- Handlers ---
+# --- Command Handlers ---
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not is_owner(u.effective_user.id): return
     await u.message.reply_text("🤖 ইমেইল বট অনলাইন।\n\n/set_content - ইমেইল লিখুন\n/check_content - বর্তমান ইমেইল দেখুন\n/start_sending - পাঠানো শুরু\n/stop_sending - থামানো\n/stats - ডাটাবেজ অবস্থা")
@@ -142,7 +141,7 @@ async def start_sending(u: Update, c: ContextTypes.DEFAULT_TYPE):
         return
     IS_SENDING = True
     c.job_queue.run_once(process_email_queue, 1, chat_id=u.effective_chat.id)
-    await u.message.reply_text("🚀 পাঠানো শুরু হচ্ছে।")
+    await u.message.reply_text("🚀 কিউতে যুক্ত করা হয়েছে। পাঠানো শুরু হচ্ছে।")
 
 async def stop_sending(u: Update, c: ContextTypes.DEFAULT_TYPE):
     global IS_SENDING
@@ -150,7 +149,7 @@ async def stop_sending(u: Update, c: ContextTypes.DEFAULT_TYPE):
     IS_SENDING = False
     await u.message.reply_text("🛑 প্রসেস থামানো হচ্ছে...")
 
-# --- Conversation Handler ---
+# --- Conversation Handler (Content Setup) ---
 SUBJECT, BODY = range(2)
 async def set_c(u, c): 
     if not is_owner(u.effective_user.id): return
@@ -174,7 +173,7 @@ async def check_content(u, c):
         await u.message.reply_text("⚠️ কিছু সেট করা নেই।")
 
 def main():
-    # JobQueue সহ অ্যাপ তৈরি
+    # Build Application with JobQueue support
     app = Application.builder().token(TOKEN).build()
     
     app.add_error_handler(error_handler)
@@ -192,6 +191,7 @@ def main():
     ))
 
     if RENDER_URL:
+        # Webhook setup for Render
         app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN[-10:], 
                         webhook_url=f"{RENDER_URL}/{TOKEN[-10:]}")
     else:
