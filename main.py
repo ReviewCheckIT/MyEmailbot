@@ -24,6 +24,9 @@ FB_URL = os.environ.get('FIREBASE_DATABASE_URL')
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
 PORT = int(os.environ.get('PORT', '10000'))
 
+# Google Apps Script Web App URL (Render-এ GAS_URL নামে সেভ করুন অথবা এখানে সরাসরি বসান)
+GAS_URL = os.environ.get('GAS_URL') # https://script.google.com/macros/s/.../exec
+
 # --- Global Control ---
 IS_SENDING = False
 
@@ -40,37 +43,27 @@ except Exception as e:
 def is_owner(uid):
     return str(uid) == str(OWNER_ID)
 
-def get_gas_url():
-    """ডাটাবেজ থেকে GAS URL নেয়, না থাকলে এনভায়রনমেন্ট থেকে নেয়"""
-    stored_url = db.reference('config/gas_url').get()
-    return stored_url if stored_url else os.environ.get('GAS_URL')
-
-# --- Send via Google Apps Script ---
+# --- Send via Google Apps Script (HTTP Request) ---
 def send_email_via_gas(to_email, subject, body_html):
-    current_url = get_gas_url()
-    if not current_url:
-        logger.error("❌ GAS_URL missing!")
-        return "URL_MISSING"
-    
     try:
-        payload = {"to": to_email, "subject": subject, "body": body_html}
-        response = requests.post(current_url, json=payload, timeout=35)
-        
+        payload = {
+            "to": to_email,
+            "subject": subject,
+            "body": body_html
+        }
+        # গুগল স্ক্রিপ্টে রিকোয়েস্ট পাঠানো
+        response = requests.post(GAS_URL, json=payload, timeout=30)
         if response.status_code == 200:
             result = response.json()
-            if result.get("status") == "success":
-                return "SUCCESS"
-            else:
-                error_msg = result.get("message", "").lower()
-                if "limit" in error_msg or "quota" in error_msg:
-                    return "LIMIT_REACHED"
-                return "GAS_ERROR"
-        return "HTTP_ERROR"
+            return result.get("status") == "success"
+        else:
+            logger.error(f"GAS Error Status: {response.status_code}")
+            return False
     except Exception as e:
-        logger.error(f"❌ Connection Error: {e}")
-        return "CONNECTION_FAILED"
+        logger.error(f"❌ GAS Connection Error: {e}")
+        return False
 
-# --- Background Processor ---
+# --- Background Human-like Processor ---
 async def process_email_queue(context: ContextTypes.DEFAULT_TYPE):
     global IS_SENDING
     chat_id = context.job.chat_id
@@ -81,14 +74,16 @@ async def process_email_queue(context: ContextTypes.DEFAULT_TYPE):
         IS_SENDING = False
         return
 
-    all_leads = db.reference('scraped_emails').get()
+    ref = db.reference('scraped_emails')
+    all_leads = ref.get()
+
     if not all_leads:
         await context.bot.send_message(chat_id, "❌ ডাটাবেজে লিড নেই।")
         IS_SENDING = False
         return
 
     count = 0
-    await context.bot.send_message(chat_id, "🚀 কিউ প্রসেস শুরু হয়েছে।")
+    await context.bot.send_message(chat_id, "🚀 Google Apps Script এর মাধ্যমে মানুষের মতো পাঠানো শুরু হয়েছে।")
 
     for key, data in all_leads.items():
         if not IS_SENDING: break
@@ -96,27 +91,22 @@ async def process_email_queue(context: ContextTypes.DEFAULT_TYPE):
 
         email = data.get('email')
         app_name = data.get('app_name', 'Developer')
+        
         final_subject = config['subject'].replace('{app_name}', app_name)
         final_body = config['body'].replace('{app_name}', app_name)
 
-        status = send_email_via_gas(email, final_subject, final_body)
-
-        if status == "SUCCESS":
-            db.reference(f'scraped_emails/{key}').update({
+        if send_email_via_gas(email, final_subject, final_body):
+            ref.child(key).update({
                 'status': 'sent', 
-                'sent_at': datetime.now().isoformat()
+                'sent_at': datetime.now().isoformat(),
+                'method': 'google_script'
             })
             count += 1
             if count % 10 == 0:
                 await context.bot.send_message(chat_id, f"✅ সফলভাবে {count} টি পাঠানো হয়েছে।")
                 await asyncio.sleep(random.randint(60, 120))
-        elif status == "LIMIT_REACHED":
-            await context.bot.send_message(chat_id, "🚨 গুগলের লিমিট শেষ! /update_gas দিয়ে নতুন লিঙ্ক দিন।")
-            break
-        elif status == "URL_MISSING":
-            await context.bot.send_message(chat_id, "❌ GAS URL সেট করা নেই।")
-            break
         
+        # প্রতিটি মেইলের মাঝে ৩০-৬০ সেকেন্ডের হিউম্যান গ্যাপ
         await asyncio.sleep(random.randint(30, 60))
 
     IS_SENDING = False
@@ -125,31 +115,14 @@ async def process_email_queue(context: ContextTypes.DEFAULT_TYPE):
 # --- Commands ---
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if is_owner(u.effective_user.id):
-        msg = (
-            "🤖 **Email Bot Pro Online**\n\n"
-            "/set_content - ইমেইল সেট করুন\n"
-            "/update_gas - নতুন জিমেইল লিঙ্ক দিন\n"
-            "/start_sending - পাঠানো শুরু করুন\n"
-            "/stop_sending - থামান\n"
-            "/stats - রিপোর্ট দেখুন"
-        )
-        await u.message.reply_text(msg)
-
-async def update_gas(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(u.effective_user.id): return
-    if not c.args:
-        await u.message.reply_text("⚠️ কমান্ডের সাথে লিঙ্ক দিন।\nউদাহরণ: `/update_gas https://...`")
-        return
-    new_url = c.args[0]
-    db.reference('config/gas_url').set(new_url)
-    await u.message.reply_text("✅ নতুন GAS URL সেভ করা হয়েছে।")
+        await u.message.reply_text("🤖 Google Script Bot Online!\n/set_content\n/start_sending\n/stats")
 
 async def stats(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not is_owner(u.effective_user.id): return
     leads = db.reference('scraped_emails').get() or {}
     total = len(leads)
     sent = sum(1 for v in leads.values() if v.get('status') == 'sent')
-    await u.message.reply_text(f"📊 মোট লিড: {total}\n✅ পাঠানো: {sent}\n⏳ বাকি: {total-sent}")
+    await u.message.reply_text(f"📊 মোট: {total}\n✅ পাঠানো: {sent}\n⏳ বাকি: {total-sent}")
 
 async def start_sending(u: Update, c: ContextTypes.DEFAULT_TYPE):
     global IS_SENDING
@@ -183,7 +156,6 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CommandHandler("update_gas", update_gas))
     app.add_handler(CommandHandler("start_sending", start_sending))
     app.add_handler(CommandHandler("stop_sending", stop_sending))
     app.add_handler(ConversationHandler(
