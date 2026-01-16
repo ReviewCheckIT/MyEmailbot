@@ -7,8 +7,15 @@ import random
 import requests
 from datetime import datetime
 
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, 
+    CommandHandler, 
+    ContextTypes, 
+    MessageHandler, 
+    CallbackQueryHandler,
+    filters
+)
 import firebase_admin
 from firebase_admin import credentials, db
 
@@ -23,9 +30,7 @@ FB_JSON = os.environ.get('FIREBASE_CREDENTIALS_JSON')
 FB_URL = os.environ.get('FIREBASE_DATABASE_URL')
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
 PORT = int(os.environ.get('PORT', '10000'))
-
-# Google Apps Script Web App URL (Render-এ GAS_URL নামে সেভ করুন অথবা এখানে সরাসরি বসান)
-GAS_URL = os.environ.get('GAS_URL') # https://script.google.com/macros/s/.../exec
+GAS_URL_ENV = os.environ.get('GAS_URL')
 
 # --- Global Control ---
 IS_SENDING = False
@@ -43,129 +48,194 @@ except Exception as e:
 def is_owner(uid):
     return str(uid) == str(OWNER_ID)
 
-# --- Send via Google Apps Script (HTTP Request) ---
-def send_email_via_gas(to_email, subject, body_html):
-    try:
-        payload = {
-            "to": to_email,
-            "subject": subject,
-            "body": body_html
-        }
-        # গুগল স্ক্রিপ্টে রিকোয়েস্ট পাঠানো
-        response = requests.post(GAS_URL, json=payload, timeout=30)
-        if response.status_code == 200:
-            result = response.json()
-            return result.get("status") == "success"
-        else:
-            logger.error(f"GAS Error Status: {response.status_code}")
-            return False
-    except Exception as e:
-        logger.error(f"❌ GAS Connection Error: {e}")
-        return False
+def get_gas_url():
+    bot_id = TOKEN.split(':')[0]
+    stored_url = db.reference(f'bot_configs/{bot_id}/gas_url').get()
+    return stored_url if stored_url else GAS_URL_ENV
 
-# --- Background Human-like Processor ---
-async def process_email_queue(context: ContextTypes.DEFAULT_TYPE):
+# --- API Caller ---
+def call_gas_api(payload):
+    url = get_gas_url()
+    if not url:
+        return {"status": "error", "message": "GAS URL পাওয়া যায়নি।"}
+    try:
+        response = requests.post(url, json=payload, timeout=35)
+        return response.json() if response.status_code == 200 else {"status": "error", "message": f"HTTP {response.status_code}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# --- Menu Builder ---
+def main_menu_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("🚀 পাঠানো শুরু করুন", callback_data='btn_start_send'),
+         InlineKeyboardButton("🛑 পাঠানো বন্ধ করুন", callback_data='btn_stop_send')],
+        [InlineKeyboardButton("📝 ইমেইল কন্টেন্ট সেট", callback_data='btn_set_content'),
+         InlineKeyboardButton("📊 লাইভ রিপোর্ট", callback_data='btn_stats')],
+        [InlineKeyboardButton("🔋 লিমিট চেক", callback_data='btn_limit'),
+         InlineKeyboardButton("🔗 GAS URL আপডেট", callback_data='btn_update_gas')],
+        [InlineKeyboardButton("🔄 ডাটা রিসেট", callback_data='btn_reset_all')]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def back_button():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 ফিরে যান", callback_data='btn_main_menu')]])
+
+# --- Background Worker ---
+async def email_worker(context: ContextTypes.DEFAULT_TYPE):
     global IS_SENDING
     chat_id = context.job.chat_id
+    bot_id = TOKEN.split(':')[0]
     
-    config = db.reference('email_config').get()
-    if not config or 'subject' not in config:
-        await context.bot.send_message(chat_id, "⚠️ Content set করা নেই!")
+    config = db.reference('shared_config/email_template').get()
+    if not config:
+        await context.bot.send_message(chat_id, "⚠️ ইমেইল টেমপ্লেট সেট করা নেই! /set_email ব্যবহার করুন।")
         IS_SENDING = False
         return
 
-    ref = db.reference('scraped_emails')
-    all_leads = ref.get()
-
-    if not all_leads:
-        await context.bot.send_message(chat_id, "❌ ডাটাবেজে লিড নেই।")
-        IS_SENDING = False
-        return
-
+    leads_ref = db.reference('scraped_emails')
     count = 0
-    await context.bot.send_message(chat_id, "🚀 Google Apps Script এর মাধ্যমে মানুষের মতো পাঠানো শুরু হয়েছে।")
 
-    for key, data in all_leads.items():
-        if not IS_SENDING: break
-        if data.get('status') == 'sent': continue
-
-        email = data.get('email')
-        app_name = data.get('app_name', 'Developer')
+    while IS_SENDING:
+        all_leads = leads_ref.get()
+        if not all_leads: break
         
-        final_subject = config['subject'].replace('{app_name}', app_name)
-        final_body = config['body'].replace('{app_name}', app_name)
+        target_key = None
+        target_data = None
+        
+        for k, v in all_leads.items():
+            if v.get('status') is None and v.get('processing_by') is None:
+                target_key = k
+                target_data = v
+                break
+        
+        if not target_key:
+            await context.bot.send_message(chat_id, "🏁 ডাটাবেজে আর কোনো নতুন লিড নেই।")
+            break
 
-        if send_email_via_gas(email, final_subject, final_body):
-            ref.child(key).update({
+        # Lock the lead
+        leads_ref.child(target_key).update({'processing_by': bot_id})
+        
+        email = target_data.get('email')
+        app_name = target_data.get('app_name', 'Developer')
+        sub = config['subject'].replace('{app_name}', app_name)
+        body = config['body'].replace('{app_name}', app_name)
+
+        res = call_gas_api({"action": "sendEmail", "to": email, "subject": sub, "body": body})
+        
+        if res.get("status") == "success":
+            leads_ref.child(target_key).update({
                 'status': 'sent', 
                 'sent_at': datetime.now().isoformat(),
-                'method': 'google_script'
+                'sent_by': bot_id,
+                'processing_by': None
             })
             count += 1
             if count % 10 == 0:
-                await context.bot.send_message(chat_id, f"✅ সফলভাবে {count} টি পাঠানো হয়েছে।")
-                await asyncio.sleep(random.randint(60, 120))
+                await context.bot.send_message(chat_id, f"✅ সফলভাবে {count}টি মেইল পাঠানো হয়েছে।")
+                await asyncio.sleep(random.randint(60, 150))
+        else:
+            leads_ref.child(target_key).update({'processing_by': None})
+            msg = res.get('message', '').lower()
+            if "limit" in msg or "quota" in msg:
+                await context.bot.send_message(chat_id, "🚨 এই জিমেইলের লিমিট শেষ! /update_gas দিয়ে নতুন লিঙ্ক দিন।")
+                IS_SENDING = False
+                break
         
-        # প্রতিটি মেইলের মাঝে ৩০-৬০ সেকেন্ডের হিউম্যান গ্যাপ
-        await asyncio.sleep(random.randint(30, 60))
+        await asyncio.sleep(random.randint(45, 90))
 
     IS_SENDING = False
-    await context.bot.send_message(chat_id, f"🏁 কাজ শেষ! সেশনে পাঠানো হয়েছে: {count}")
+    await context.bot.send_message(chat_id, f"🏁 সেশন শেষ। মোট পাঠানো হয়েছে: {count}")
 
-# --- Commands ---
-async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    if is_owner(u.effective_user.id):
-        await u.message.reply_text("🤖 Google Script Bot Online!\n/set_content\n/start_sending\n/stats")
+# --- Handlers ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id): return
+    await update.message.reply_text("🤖 **ইমেইল মার্কেটিং কন্ট্রোল প্যানেল**", 
+                                   reply_markup=main_menu_keyboard(), parse_mode="Markdown")
 
-async def stats(u: Update, c: ContextTypes.DEFAULT_TYPE):
+async def button_tap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global IS_SENDING
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == 'btn_main_menu':
+        await query.edit_message_text("🤖 **ইমেইল মার্কেটিং কন্ট্রোল প্যানেল**", reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+    
+    elif query.data == 'btn_start_send':
+        if IS_SENDING:
+            await query.edit_message_text("⚠️ অলরেডি পাঠানো হচ্ছে।", reply_markup=back_button())
+        else:
+            IS_SENDING = True
+            context.job_queue.run_once(email_worker, 1, chat_id=query.message.chat_id)
+            await query.edit_message_text("🚀 কিউ প্রসেস শুরু হয়েছে...", reply_markup=back_button())
+            
+    elif query.data == 'btn_stop_send':
+        IS_SENDING = False
+        await query.edit_message_text("🛑 পাঠানো বন্ধ করার রিকোয়েস্ট নেওয়া হয়েছে।", reply_markup=back_button())
+        
+    elif query.data == 'btn_stats':
+        leads = db.reference('scraped_emails').get() or {}
+        total = len(leads)
+        sent = sum(1 for v in leads.values() if v.get('status') == 'sent')
+        await query.edit_message_text(f"📊 **লাইভ রিপোর্ট:**\n\nমোট লিড: {total}\n✅ পাঠানো হয়েছে: {sent}\n⏳ বাকি আছে: {total-sent}", 
+                                     reply_markup=back_button())
+    
+    elif query.data == 'btn_limit':
+        await query.edit_message_text("⏳ লিমিট চেক করা হচ্ছে...")
+        res = call_gas_api({"action": "getLimit"})
+        rem = res.get("remaining", "Unknown")
+        await query.edit_message_text(f"📉 বর্তমান জিমেইলের অবশিষ্ট লিমিট: **{rem}**", 
+                                     reply_markup=back_button(), parse_mode="Markdown")
+
+    elif query.data == 'btn_set_content':
+        await query.edit_message_text("📝 ইমেইল সেট করতে `/set_email` কমান্ডটি ব্যবহার করুন।\n\nফরম্যাট: `Subject | Body`", 
+                                     reply_markup=back_button())
+
+    elif query.data == 'btn_update_gas':
+        await query.edit_message_text("🔗 লিঙ্ক আপডেট করতে `/update_gas [URL]` কমান্ডটি ব্যবহার করুন।", 
+                                     reply_markup=back_button())
+    
+    elif query.data == 'btn_reset_all':
+        await query.edit_message_text("⚠️ আপনি কি সব 'Sent' স্ট্যাটাস রিসেট করতে চান?\n\nনিশ্চিত হলে লিখুন: `/confirm_reset`", 
+                                     reply_markup=back_button())
+
+async def update_gas_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(u.effective_user.id): return
+    if not c.args:
+        await u.message.reply_text("⚠️ ব্যবহার: `/update_gas https://...`")
+        return
+    bot_id = TOKEN.split(':')[0]
+    db.reference(f'bot_configs/{bot_id}/gas_url').set(c.args[0])
+    await u.message.reply_text("✅ এই বটের জন্য নতুন GAS URL সেভ করা হয়েছে।")
+
+async def set_email_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(u.effective_user.id): return
+    try:
+        content = u.message.text.split('/set_email ', 1)[1]
+        sub, body = content.split('|', 1)
+        db.reference('shared_config/email_template').set({'subject': sub.strip(), 'body': body.strip()})
+        await u.message.reply_text("✅ সেন্ট্রাল ইমেইল টেমপ্লেট আপডেট হয়েছে।")
+    except:
+        await u.message.reply_text("❌ ভুল ফরম্যাট! সঠিক নিয়ম: `/set_email Subject | Body`")
+
+async def confirm_reset_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not is_owner(u.effective_user.id): return
     leads = db.reference('scraped_emails').get() or {}
-    total = len(leads)
-    sent = sum(1 for v in leads.values() if v.get('status') == 'sent')
-    await u.message.reply_text(f"📊 মোট: {total}\n✅ পাঠানো: {sent}\n⏳ বাকি: {total-sent}")
-
-async def start_sending(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    global IS_SENDING
-    if not is_owner(u.effective_user.id): return
-    if IS_SENDING:
-        await u.message.reply_text("⚠️ অলরেডি পাঠানো হচ্ছে।")
-        return
-    IS_SENDING = True
-    c.job_queue.run_once(process_email_queue, 1, chat_id=u.effective_chat.id)
-    await u.message.reply_text("🚀 কিউতে যুক্ত করা হয়েছে।")
-
-async def stop_sending(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    global IS_SENDING
-    if not is_owner(u.effective_user.id): return
-    IS_SENDING = False
-    await u.message.reply_text("🛑 থামানো হচ্ছে...")
-
-# --- Conversation ---
-SUBJECT, BODY = range(2)
-async def set_c(u, c): 
-    if not is_owner(u.effective_user.id): return
-    await u.message.reply_text("Subject:"); return SUBJECT
-async def set_s(u, c):
-    c.user_data['ts'] = u.message.text
-    await u.message.reply_text("Body (HTML):"); return BODY
-async def set_b(u, c):
-    db.reference('email_config').set({'subject': c.user_data['ts'], 'body': u.message.text})
-    await u.message.reply_text("✅ Saved!"); return ConversationHandler.END
+    for k in leads:
+        db.reference(f'scraped_emails/{k}').update({'status': None, 'processing_by': None, 'sent_by': None})
+    await u.message.reply_text("🔄 ডাটাবেজ রিসেট সম্পন্ন। সব বট এখন আবার শুরু থেকে কাজ করতে পারবে।")
 
 def main():
     app = Application.builder().token(TOKEN).build()
+    
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CommandHandler("start_sending", start_sending))
-    app.add_handler(CommandHandler("stop_sending", stop_sending))
-    app.add_handler(ConversationHandler(
-        entry_points=[CommandHandler('set_content', set_c)],
-        states={SUBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_s)],
-                BODY: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_b)]},
-        fallbacks=[]
-    ))
+    app.add_handler(CommandHandler("update_gas", update_gas_cmd))
+    app.add_handler(CommandHandler("set_email", set_email_cmd))
+    app.add_handler(CommandHandler("confirm_reset", confirm_reset_cmd))
+    app.add_handler(CallbackQueryHandler(button_tap))
+
     if RENDER_URL:
-        app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN[-10:], webhook_url=f"{RENDER_URL}/{TOKEN[-10:]}")
+        app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN[-10:], 
+                        webhook_url=f"{RENDER_URL}/{TOKEN[-10:]}")
     else:
         app.run_polling()
 
