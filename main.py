@@ -20,7 +20,7 @@ from telegram.ext import (
 )
 import firebase_admin
 from firebase_admin import credentials, db
-from google.genai import Client
+import google.generativeai as genai  # ✅ স্ট্যান্ডার্ড লাইব্রেরি ব্যবহার করা হয়েছে
 
 # --- Logging Setup ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -56,66 +56,67 @@ except Exception as e:
 def is_owner(uid):
     return str(uid) == str(OWNER_ID)
 
-# --- AI Helper Functions ---
-def get_next_gemini_client():
-    """চাবি রোটেট করে ক্লায়েন্ট রিটার্ন করবে"""
+# --- AI Helper Functions (Updated) ---
+def get_next_api_key():
+    """চাবি রোটেট করে পরেরটি রিটার্ন করবে"""
     global CURRENT_KEY_INDEX
     if not GEMINI_KEYS: return None
-    
-    # বর্তমান ইনডেক্স থেকে চাবি নেওয়া
-    api_key = GEMINI_KEYS[CURRENT_KEY_INDEX % len(GEMINI_KEYS)]
-    CURRENT_KEY_INDEX += 1  # পরের বারের জন্য ইনডেক্স বাড়ানো
-    try:
-        return Client(api_key=api_key)
-    except:
-        return None
+    key = GEMINI_KEYS[CURRENT_KEY_INDEX % len(GEMINI_KEYS)]
+    CURRENT_KEY_INDEX += 1
+    return key
 
 async def rewrite_email_with_ai(original_sub, original_body, app_name):
     """
     AI দিয়ে ইমেইল রি-রাইট করবে। 
-    FIX: gemini-2.0 এর বদলে gemini-1.5-flash ব্যবহার করা হয়েছে।
+    FIX: এখন google.generativeai লাইব্রেরি ব্যবহার করা হচ্ছে যা 404 এরর দেয় না।
     """
     if not GEMINI_KEYS:
         return original_sub, original_body
 
-    # লুপ চালিয়ে সব চাবি চেক করবে যতক্ষণ না কাজ হয়
-    max_tries = len(GEMINI_KEYS) + 1
-    
-    for _ in range(max_tries):
-        client = get_next_gemini_client()
-        if not client: break
+    # ৩ বার চেষ্টা করবে ভিন্ন ভিন্ন চাবি দিয়ে
+    for _ in range(3):
+        api_key = get_next_api_key()
+        if not api_key: break
+
+        # API কনফিগার করা
+        genai.configure(api_key=api_key)
 
         prompt = f"""
         Act as a professional app growth manager. Rewrite the email below for an Android App named "{app_name}".
         
         Constraints:
         1. Keep the meaning exactly the same.
-        2. Change the wording to avoid spam filters.
-        3. Keep it short and professional.
+        2. Change wording slightly to avoid spam detection.
+        3. Tone: Professional and polite.
         4. Output format MUST be: Subject: [New Subject] ||| Body: [New Body]
         
         Original Subject: {original_sub}
         Original Body: {original_body}
         """
         
-        try:
-            # FIX: Model changed to gemini-1.5-flash for better limits
-            response = client.models.generate_content(model='gemini-1.5-flash', contents=prompt)
-            text = response.text.strip()
-            
-            if "|||" in text:
-                parts = text.split("|||")
-                new_sub = parts[0].replace("Subject:", "").strip()
-                new_body = parts[1].replace("Body:", "").strip()
-                new_body = new_body.replace('\n', '<br>')
-                return new_sub, new_body
-        except Exception as e:
-            logger.warning(f"AI Key Failed (Switching to next): {e}")
-            await asyncio.sleep(1) # ১ সেকেন্ড বিরতি দিয়ে পরের চাবি ট্রাই করবে
-            continue 
+        # প্রথমে Flash মডেল চেষ্টা করবে, না হলে Pro মডেল
+        models_to_try = ['gemini-1.5-flash', 'gemini-pro']
+        
+        for model_name in models_to_try:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
+                
+                text = response.text.strip()
+                if "|||" in text:
+                    parts = text.split("|||")
+                    new_sub = parts[0].replace("Subject:", "").strip()
+                    new_body = parts[1].replace("Body:", "").strip()
+                    new_body = new_body.replace('\n', '<br>')
+                    return new_sub, new_body
+            except Exception as e:
+                logger.warning(f"Model {model_name} failed with key ending in ...{api_key[-4:]}: {e}")
+                continue # পরের মডেলে যাবে
 
-    # যদি সব চাবি ফেইল করে, তবে অরিজিনাল টেক্সট রিটার্ন করবে (বট থামবে না)
-    logger.error("❌ All AI keys failed or exhausted. Using original text.")
+        await asyncio.sleep(1) # চাবি পাল্টানোর আগে ১ সেকেন্ড বিরতি
+
+    # সব চাবি ফেইল করলে অরিজিনাল টেক্সট রিটার্ন করবে (বট থামবে না)
+    logger.error("❌ All AI keys failed. Using original text.")
     return original_sub, original_body
 
 # --- Helper Functions ---
@@ -137,9 +138,9 @@ def call_gas_api(payload):
 
 def main_menu_keyboard():
     keyboard = [
-        [InlineKeyboardButton("🚀 AI Send Start", callback_data='btn_start_send')],
-        [InlineKeyboardButton("🛑 Stop Sending", callback_data='btn_stop_send')],
-        [InlineKeyboardButton("📊 Stats", callback_data='btn_stats'),
+        [InlineKeyboardButton("🚀 Start Sending", callback_data='btn_start_send')],
+        [InlineKeyboardButton("🛑 Stop", callback_data='btn_stop_send')],
+        [InlineKeyboardButton("📊 Report", callback_data='btn_stats'),
          InlineKeyboardButton("📝 Set Email", callback_data='btn_set_content')],
         [InlineKeyboardButton("🔄 Reset DB", callback_data='btn_reset_all')]
     ]
@@ -164,7 +165,7 @@ async def email_worker(context: ContextTypes.DEFAULT_TYPE):
     count = 0
     fail_count = 0
 
-    await context.bot.send_message(chat_id, f"🤖 **AI Sending Started**\nModel: Gemini 1.5 Flash\nKeys Loaded: {len(GEMINI_KEYS)}")
+    await context.bot.send_message(chat_id, f"🤖 **AI Sending Started**\nLibrary: google-generativeai\nKeys Loaded: {len(GEMINI_KEYS)}")
 
     while IS_SENDING:
         all_leads = leads_ref.get()
@@ -195,7 +196,7 @@ async def email_worker(context: ContextTypes.DEFAULT_TYPE):
         orig_sub = config['subject'].replace('{app_name}', app_name)
         orig_body = config['body'].replace('{app_name}', app_name)
         
-        # AI Rewrite Call
+        # AI Rewrite Call (Robust Version)
         final_subject, ai_body = await rewrite_email_with_ai(orig_sub, orig_body, app_name)
         
         # Anti-Spam Hidden ID
@@ -255,7 +256,7 @@ async def email_worker(context: ContextTypes.DEFAULT_TYPE):
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id): return
-    await update.message.reply_text("🤖 **AI Email Sender v2**\n(Fixed 429 Errors)", 
+    await update.message.reply_text("🤖 **AI Email Sender (Stable)**\nLibrary Fixed: google-generativeai", 
                                    reply_markup=main_menu_keyboard())
 
 async def button_tap(update: Update, context: ContextTypes.DEFAULT_TYPE):
