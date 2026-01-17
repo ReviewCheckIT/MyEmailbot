@@ -2,3 +2,5 @@ python-telegram-bot[all]>=20.0
 firebase-admin>=6.0.0
 requests>=2.31.0
 python-dotenv
+google-play-scraper
+google-genai
