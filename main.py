@@ -91,8 +91,8 @@ async def rewrite_email_with_ai(original_sub, original_body, app_name):
         try:
             genai.configure(api_key=api_key)
             
-            # মডেল লিস্ট আপডেট করা হয়েছে
-            models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
+            # gemini-pro বাদ দেওয়া হয়েছে কারণ এটি এখন আর কাজ করছে না
+            models_to_try = ['gemini-1.5-flash']
             
             prompt = f"""
             Act as a professional app growth manager. Rewrite the email below for an Android App named "{app_name}".
