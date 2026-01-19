@@ -1,6 +1,7 @@
 python-telegram-bot[all]>=20.0
-firebase-admin>=6.0.0
 requests>=2.31.0
-python-dotenv
-google-play-scraper
-google-generativeai
+firebase-admin>=6.2.0
+google-generativeai>=0.3.0
+python-dotenv>=1.0.0
+grpcio>=1.60.0
+protobuf>=4.25.0
