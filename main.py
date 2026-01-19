@@ -121,34 +121,7 @@ async def rewrite_email_with_ai(original_sub, original_body, app_name):
                 # logger.warning(f"Model {model_name} skipped: {inner_e}") 
                 continue
             
-            prompt = f"""
-            Act as a professional app growth manager. Rewrite the email below for an Android App named "{app_name}".
             
-            Constraints:
-            1. Keep the meaning exactly the same.
-            2. Change wording slightly to avoid spam detection.
-            3. Tone: Professional and polite.
-            4. Output format MUST be: Subject: [New Subject] ||| Body: [New Body]
-            
-            Original Subject: {original_sub}
-            Original Body: {original_body}
-            """
-            
-            for model_name in models_to_try:
-                try:
-                    model = genai.GenerativeModel(model_name)
-                    response = model.generate_content(prompt)
-                    
-                    text = response.text.strip()
-                    if "|||" in text:
-                        parts = text.split("|||")
-                        new_sub = parts[0].replace("Subject:", "").strip()
-                        new_body = parts[1].replace("Body:", "").strip()
-                        new_body = new_body.replace('\n', '<br>')
-                        return new_sub, new_body
-                except Exception as inner_e:
-                    logger.warning(f"Model {model_name} skipped: {inner_e}")
-                    continue 
 
         except Exception as e:
             logger.error(f"AI Key Error: {e}")
