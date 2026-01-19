@@ -39,7 +39,7 @@ RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
 PORT = int(os.environ.get('PORT', '10000'))
 GAS_URL_ENV = os.environ.get('GAS_URL')
 
-# Gemini API Keys
+# Gemini API Keys (Comma separated)
 GEMINI_KEYS_STR = os.environ.get('GEMINI_API_KEYS', '') 
 GEMINI_KEYS = [k.strip() for k in GEMINI_KEYS_STR.split(',') if k.strip()]
 
@@ -52,7 +52,7 @@ try:
     if not firebase_admin._apps:
         if FB_JSON:
             try:
-                # Check if it's a file path or JSON string
+                # Check if JSON is file path or raw JSON string
                 if os.path.exists(FB_JSON):
                     cred = credentials.Certificate(FB_JSON)
                 else:
@@ -64,15 +64,16 @@ try:
             except Exception as e:
                 logger.error(f"❌ Firebase Auth Error: {e}")
         else:
-            logger.warning("⚠️ FIREBASE_CREDENTIALS_JSON not found!")
+            logger.warning("⚠️ FIREBASE_CREDENTIALS_JSON missing!")
 except Exception as e:
     logger.error(f"❌ Firebase Init Error: {e}")
 
 def is_owner(uid):
     return str(uid) == str(OWNER_ID)
 
-# --- AI Helper Functions (Updated for Gemini 1.5) ---
+# --- AI Helper Functions (FIXED for 404 Error) ---
 def get_next_api_key():
+    """চাবি রোটেট করে পরেরটি রিটার্ন করবে"""
     global CURRENT_KEY_INDEX
     if not GEMINI_KEYS: return None
     key = GEMINI_KEYS[CURRENT_KEY_INDEX % len(GEMINI_KEYS)]
@@ -80,19 +81,22 @@ def get_next_api_key():
     return key
 
 async def rewrite_email_with_ai(original_sub, original_body, app_name):
+    """
+    AI দিয়ে ইমেইল রি-রাইট করবে। 
+    FIX: এখন লেটেস্ট মডেল নাম ব্যবহার করা হচ্ছে।
+    """
     if not GEMINI_KEYS:
         return original_sub, original_body
 
-    for _ in range(3): # Try 3 times with different keys
+    # ৩ বার চেষ্টা করবে ভিন্ন ভিন্ন চাবি দিয়ে
+    for _ in range(3):
         api_key = get_next_api_key()
         if not api_key: break
 
         try:
+            # API কনফিগার করা
             genai.configure(api_key=api_key)
-            
-            # ✅ UPDATED MODEL LIST (Removed deprecated models)
-            models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro']
-            
+
             prompt = f"""
             Act as a professional app growth manager. Rewrite the email below for an Android App named "{app_name}".
             
@@ -105,6 +109,9 @@ async def rewrite_email_with_ai(original_sub, original_body, app_name):
             Original Subject: {original_sub}
             Original Body: {original_body}
             """
+            
+            # ✅ ফিক্স: পুরনো মডেল বাদ দিয়ে নতুন মডেল দেওয়া হয়েছে
+            models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
             
             for model_name in models_to_try:
                 try:
@@ -120,28 +127,28 @@ async def rewrite_email_with_ai(original_sub, original_body, app_name):
                             new_body = new_body.replace('\n', '<br>')
                             return new_sub, new_body
                 except Exception as inner_e:
-                    logger.warning(f"⚠️ Model {model_name} skipped: {inner_e}")
+                    # মডেল না পেলে পরেরটা ট্রাই করবে
                     continue 
 
         except Exception as e:
             logger.error(f"❌ AI Key Error: {e}")
             continue
 
-        await asyncio.sleep(1)
+        await asyncio.sleep(1) # চাবি পাল্টানোর আগে ১ সেকেন্ড বিরতি
 
+    # সব চাবি ফেইল করলে অরিজিনাল টেক্সট রিটার্ন করবে (বট থামবে না)
     logger.error("❌ All AI keys failed. Using original text.")
     return original_sub, original_body
 
 # --- Helper Functions ---
 def get_gas_url():
-    # Try to get from DB, fallback to ENV
     try:
         if firebase_admin._apps:
             bot_id = TOKEN.split(':')[0]
             stored_url = db.reference(f'bot_configs/{bot_id}/gas_url').get()
-            if stored_url: return stored_url
+            return stored_url if stored_url else GAS_URL_ENV
     except:
-        pass
+        return GAS_URL_ENV
     return GAS_URL_ENV
 
 def generate_random_id(length=8):
@@ -150,19 +157,17 @@ def generate_random_id(length=8):
 def call_gas_api(payload):
     url = get_gas_url()
     if not url: return {"status": "error", "message": "GAS URL missing"}
-    
     try:
-        # 403 Error prevention: Follow redirects
-        response = requests.post(url, json=payload, timeout=30, allow_redirects=True)
+        # 403 এরর এড়াতে allow_redirects=True দেওয়া হয়েছে
+        response = requests.post(url, json=payload, timeout=60, allow_redirects=True)
         
         if response.status_code == 200:
             return response.json()
         elif response.status_code == 302:
-            return {"status": "error", "message": "Redirect Error (Check GAS Deployment)"}
+            return {"status": "error", "message": "GAS Redirect Error (Check Access Settings)"}
         else:
             return {"status": "error", "message": f"HTTP {response.status_code}"}
-            
-    except Exception as e:
+    except Exception as e: 
         return {"status": "error", "message": str(e)}
 
 def main_menu_keyboard():
@@ -192,19 +197,23 @@ async def email_worker(context: ContextTypes.DEFAULT_TYPE):
             return
 
         leads_ref = db.reference('scraped_emails')
-        all_leads = leads_ref.get()
     except Exception as e:
-        await context.bot.send_message(chat_id, f"🔥 Database Error: {e}")
+        await context.bot.send_message(chat_id, f"❌ DB Error: {e}")
         IS_SENDING = False
         return
 
     count = 0
     fail_count = 0
 
-    await context.bot.send_message(chat_id, f"🤖 **AI Sending Started**\nModel: Gemini 1.5 Flash\nKeys: {len(GEMINI_KEYS)}")
+    await context.bot.send_message(chat_id, f"🤖 **AI Sending Started**\nLibrary: google-generativeai (Fixed)\nKeys: {len(GEMINI_KEYS)}")
 
     while IS_SENDING:
-        all_leads = leads_ref.get()
+        try:
+            all_leads = leads_ref.get()
+        except:
+            await asyncio.sleep(5)
+            continue
+
         if not all_leads: 
             await context.bot.send_message(chat_id, "🏁 ডাটাবেজ খালি!")
             break
@@ -223,17 +232,20 @@ async def email_worker(context: ContextTypes.DEFAULT_TYPE):
             IS_SENDING = False
             break
 
+        # Lock the lead
         leads_ref.child(target_key).update({'processing_by': bot_id})
         
         email = target_data.get('email')
         app_name = target_data.get('app_name', 'App Developer')
         
         # --- AI Processing ---
-        orig_sub = config.get('subject', 'Hello').replace('{app_name}', app_name)
+        orig_sub = config.get('subject', 'Hi').replace('{app_name}', app_name)
         orig_body = config.get('body', 'Hello').replace('{app_name}', app_name)
         
+        # AI Rewrite Call
         final_subject, ai_body = await rewrite_email_with_ai(orig_sub, orig_body, app_name)
         
+        # Anti-Spam Hidden ID
         unique_id = generate_random_id()
         final_body = f"{ai_body}<br><br><span style='display:none;color:transparent;'>RefID: {unique_id}</span>"
 
@@ -260,15 +272,16 @@ async def email_worker(context: ContextTypes.DEFAULT_TYPE):
             fail_count = 0 
             
             if count == 1:
-                await context.bot.send_message(chat_id, f"✅ ১ম ইমেইল সফল! ({email})\nSubject: {final_subject}")
+                await context.bot.send_message(chat_id, f"✅ ১ম ইমেইল সফল! ({email})\nAI Subject: {final_subject}")
             elif count % 10 == 0:
                 await context.bot.send_message(chat_id, f"📊 রিপোর্ট: {count}টি ইমেইল পাঠানো হয়েছে।")
 
+            # Smart Random Delay (3-5 Mins)
             wait_time = random.randint(180, 300)
             await asyncio.sleep(wait_time)
 
         else:
-            # Release lock on failure
+            # Unlock on failure
             leads_ref.child(target_key).update({'processing_by': None})
             fail_count += 1
             
@@ -278,14 +291,14 @@ async def email_worker(context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(chat_id, "🚨 জিমেইল লিমিট শেষ! GAS URL পরিবর্তন করুন।")
                 IS_SENDING = False
                 break
-            
+
             if "script function not found" in msg or "404" in msg or "403" in msg:
-                 await context.bot.send_message(chat_id, f"🚨 GAS Error: {msg}\nCheck deployment settings (Anyone access).")
+                 await context.bot.send_message(chat_id, f"🚨 GAS Error: {msg}\nCheck GAS Deployment setting (Anyone).")
                  IS_SENDING = False
                  break
-
+            
             if fail_count >= 5:
-                await context.bot.send_message(chat_id, "⚠️ টানা ৫টি ইমেইল ফেইল। প্রসেস থামানো হলো।")
+                await context.bot.send_message(chat_id, "⚠️ টানা ৫টি ইমেইল ফেইল। সিস্টেম চেক করুন।")
                 IS_SENDING = False
                 break
             
@@ -297,7 +310,8 @@ async def email_worker(context: ContextTypes.DEFAULT_TYPE):
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id): return
-    await update.message.reply_text("🤖 **App Growth AI Mailer**\nVersion: 2.0 (Gemini 1.5)", reply_markup=main_menu_keyboard())
+    await update.message.reply_text("🤖 **AI Email Sender (Full Version)**\nStatus: Fixed & Ready", 
+                                   reply_markup=main_menu_keyboard())
 
 async def button_tap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_SENDING
@@ -311,6 +325,8 @@ async def button_tap(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if IS_SENDING:
             await query.edit_message_text("⚠️ Already Running!", reply_markup=back_button())
         else:
+            if not GEMINI_KEYS:
+                await context.bot.send_message(query.message.chat_id, "⚠️ No AI Keys found! Running in basic mode.")
             IS_SENDING = True
             context.job_queue.run_once(email_worker, 1, chat_id=query.message.chat_id)
             await query.edit_message_text("🚀 Starting AI Sender...", reply_markup=back_button())
@@ -327,7 +343,7 @@ async def button_tap(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"📊 **Stats:**\nTotal: {total}\nSent: {sent}\nPending: {total-sent}", 
                                          reply_markup=back_button())
         except:
-             await query.edit_message_text("📊 Stats unavailable", reply_markup=back_button())
+            await query.edit_message_text("📊 Stats unavailable (DB Error)", reply_markup=back_button())
 
     elif query.data == 'btn_set_content':
         await query.edit_message_text("Usage:\n`/set_email Subject | Body`", reply_markup=back_button(), parse_mode="Markdown")
@@ -340,12 +356,9 @@ async def update_gas_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
         await u.message.reply_text("Usage: `/update_gas URL`")
         return
-    try:
-        bot_id = TOKEN.split(':')[0]
-        db.reference(f'bot_configs/{bot_id}/gas_url').set(c.args[0])
-        await u.message.reply_text("✅ GAS URL Updated.")
-    except Exception as e:
-        await u.message.reply_text(f"❌ DB Error: {e}")
+    bot_id = TOKEN.split(':')[0]
+    db.reference(f'bot_configs/{bot_id}/gas_url').set(c.args[0])
+    await u.message.reply_text("✅ GAS URL Updated.")
 
 async def set_email_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not is_owner(u.effective_user.id): return
@@ -372,7 +385,7 @@ async def confirm_reset_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 def main():
     if not TOKEN:
-        print("❌ Error: EMAIL_BOT_TOKEN missing.")
+        print("❌ EMAIL_BOT_TOKEN missing in ENV")
         return
         
     app = Application.builder().token(TOKEN).build()
@@ -382,7 +395,7 @@ def main():
     app.add_handler(CommandHandler("confirm_reset", confirm_reset_cmd))
     app.add_handler(CallbackQueryHandler(button_tap))
 
-    logger.info("🤖 Bot is starting on Render...")
+    logger.info("🤖 Bot is starting (Full Version)...")
     
     if RENDER_URL:
         app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN[-10:], 
