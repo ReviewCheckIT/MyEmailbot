@@ -8,6 +8,7 @@ import string
 import requests
 import time
 from datetime import datetime
+from dotenv import load_dotenv  # ✅ নতুন যোগ করা হয়েছে (লোকাল রান এর জন্য)
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -20,7 +21,10 @@ from telegram.ext import (
 )
 import firebase_admin
 from firebase_admin import credentials, db
-import google.generativeai as genai  # ✅ স্ট্যান্ডার্ড লাইব্রেরি ব্যবহার করা হয়েছে
+import google.generativeai as genai
+
+# --- Load Environment Variables ---
+load_dotenv()  # .env ফাইল থেকে ভেরিয়েবল লোড করবে
 
 # --- Logging Setup ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -35,7 +39,7 @@ RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
 PORT = int(os.environ.get('PORT', '10000'))
 GAS_URL_ENV = os.environ.get('GAS_URL')
 
-# Gemini API Keys (Comma separated)
+# Gemini API Keys
 GEMINI_KEYS_STR = os.environ.get('GEMINI_API_KEYS', '') 
 GEMINI_KEYS = [k.strip() for k in GEMINI_KEYS_STR.split(',') if k.strip()]
 
@@ -46,19 +50,30 @@ CURRENT_KEY_INDEX = 0
 # --- Firebase Initialization ---
 try:
     if not firebase_admin._apps:
-        cred_dict = json.loads(FB_JSON)
-        cred = credentials.Certificate(cred_dict)
-        firebase_admin.initialize_app(cred, {'databaseURL': FB_URL})
-    logger.info("🔥 Firebase Connected!")
+        if FB_JSON:
+            try:
+                # যদি JSON স্ট্রিং হয়
+                cred_dict = json.loads(FB_JSON)
+                cred = credentials.Certificate(cred_dict)
+            except json.JSONDecodeError:
+                # যদি JSON ফাইলের পাথ (Path) দেওয়া থাকে
+                if os.path.exists(FB_JSON):
+                    cred = credentials.Certificate(FB_JSON)
+                else:
+                    raise Exception("Invalid Firebase JSON or Path")
+            
+            firebase_admin.initialize_app(cred, {'databaseURL': FB_URL})
+            logger.info("🔥 Firebase Connected!")
+        else:
+            logger.warning("⚠️ FIREBASE_CREDENTIALS_JSON not found!")
 except Exception as e:
     logger.error(f"❌ Firebase Error: {e}")
 
 def is_owner(uid):
     return str(uid) == str(OWNER_ID)
 
-# --- AI Helper Functions (Updated) ---
+# --- AI Helper Functions ---
 def get_next_api_key():
-    """চাবি রোটেট করে পরেরটি রিটার্ন করবে"""
     global CURRENT_KEY_INDEX
     if not GEMINI_KEYS: return None
     key = GEMINI_KEYS[CURRENT_KEY_INDEX % len(GEMINI_KEYS)]
@@ -66,64 +81,66 @@ def get_next_api_key():
     return key
 
 async def rewrite_email_with_ai(original_sub, original_body, app_name):
-    """
-    AI দিয়ে ইমেইল রি-রাইট করবে। 
-    FIX: এখন google.generativeai লাইব্রেরি ব্যবহার করা হচ্ছে যা 404 এরর দেয় না।
-    """
     if not GEMINI_KEYS:
         return original_sub, original_body
 
-    # ৩ বার চেষ্টা করবে ভিন্ন ভিন্ন চাবি দিয়ে
     for _ in range(3):
         api_key = get_next_api_key()
         if not api_key: break
 
-        # API কনফিগার করা
-        genai.configure(api_key=api_key)
+        try:
+            genai.configure(api_key=api_key)
+            
+            # মডেল লিস্ট আপডেট করা হয়েছে
+            models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
+            
+            prompt = f"""
+            Act as a professional app growth manager. Rewrite the email below for an Android App named "{app_name}".
+            
+            Constraints:
+            1. Keep the meaning exactly the same.
+            2. Change wording slightly to avoid spam detection.
+            3. Tone: Professional and polite.
+            4. Output format MUST be: Subject: [New Subject] ||| Body: [New Body]
+            
+            Original Subject: {original_sub}
+            Original Body: {original_body}
+            """
+            
+            for model_name in models_to_try:
+                try:
+                    model = genai.GenerativeModel(model_name)
+                    response = model.generate_content(prompt)
+                    
+                    text = response.text.strip()
+                    if "|||" in text:
+                        parts = text.split("|||")
+                        new_sub = parts[0].replace("Subject:", "").strip()
+                        new_body = parts[1].replace("Body:", "").strip()
+                        new_body = new_body.replace('\n', '<br>')
+                        return new_sub, new_body
+                except Exception as inner_e:
+                    logger.warning(f"Model {model_name} skipped: {inner_e}")
+                    continue 
 
-        prompt = f"""
-        Act as a professional app growth manager. Rewrite the email below for an Android App named "{app_name}".
-        
-        Constraints:
-        1. Keep the meaning exactly the same.
-        2. Change wording slightly to avoid spam detection.
-        3. Tone: Professional and polite.
-        4. Output format MUST be: Subject: [New Subject] ||| Body: [New Body]
-        
-        Original Subject: {original_sub}
-        Original Body: {original_body}
-        """
-        
-        # প্রথমে Flash মডেল চেষ্টা করবে, না হলে Pro মডেল
-        models_to_try = ['gemini-1.5-flash', 'gemini-pro']
-        
-        for model_name in models_to_try:
-            try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(prompt)
-                
-                text = response.text.strip()
-                if "|||" in text:
-                    parts = text.split("|||")
-                    new_sub = parts[0].replace("Subject:", "").strip()
-                    new_body = parts[1].replace("Body:", "").strip()
-                    new_body = new_body.replace('\n', '<br>')
-                    return new_sub, new_body
-            except Exception as e:
-                logger.warning(f"Model {model_name} failed with key ending in ...{api_key[-4:]}: {e}")
-                continue # পরের মডেলে যাবে
+        except Exception as e:
+            logger.error(f"AI Key Error: {e}")
+            continue
 
-        await asyncio.sleep(1) # চাবি পাল্টানোর আগে ১ সেকেন্ড বিরতি
+        await asyncio.sleep(1)
 
-    # সব চাবি ফেইল করলে অরিজিনাল টেক্সট রিটার্ন করবে (বট থামবে না)
     logger.error("❌ All AI keys failed. Using original text.")
     return original_sub, original_body
 
 # --- Helper Functions ---
 def get_gas_url():
-    bot_id = TOKEN.split(':')[0]
-    stored_url = db.reference(f'bot_configs/{bot_id}/gas_url').get()
-    return stored_url if stored_url else GAS_URL_ENV
+    if not firebase_admin._apps: return GAS_URL_ENV
+    try:
+        bot_id = TOKEN.split(':')[0]
+        stored_url = db.reference(f'bot_configs/{bot_id}/gas_url').get()
+        return stored_url if stored_url else GAS_URL_ENV
+    except:
+        return GAS_URL_ENV
 
 def generate_random_id(length=8):
     return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
@@ -133,8 +150,9 @@ def call_gas_api(payload):
     if not url: return {"status": "error", "message": "GAS URL missing"}
     try:
         response = requests.post(url, json=payload, timeout=60)
-        return response.json() if response.status_code == 200 else {"status": "error"}
-    except: return {"status": "error"}
+        return response.json() if response.status_code == 200 else {"status": "error", "message": f"HTTP {response.status_code}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 def main_menu_keyboard():
     keyboard = [
@@ -155,19 +173,27 @@ async def email_worker(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
     bot_id = TOKEN.split(':')[0]
     
-    config = db.reference('shared_config/email_template').get()
-    if not config:
-        await context.bot.send_message(chat_id, "⚠️ ইমেইল টেম্পলেট নেই! /set_email দিয়ে সেট করুন।")
+    try:
+        config = db.reference('shared_config/email_template').get()
+        if not config:
+            await context.bot.send_message(chat_id, "⚠️ ইমেইল টেম্পলেট নেই! /set_email দিয়ে সেট করুন।")
+            IS_SENDING = False
+            return
+
+        leads_ref = db.reference('scraped_emails')
+        all_leads = leads_ref.get()
+    except Exception as e:
+        await context.bot.send_message(chat_id, f"🔥 Database Error: {e}")
         IS_SENDING = False
         return
 
-    leads_ref = db.reference('scraped_emails')
     count = 0
     fail_count = 0
 
     await context.bot.send_message(chat_id, f"🤖 **AI Sending Started**\nLibrary: google-generativeai\nKeys Loaded: {len(GEMINI_KEYS)}")
 
     while IS_SENDING:
+        # Refresh Data to avoid stale state
         all_leads = leads_ref.get()
         if not all_leads: 
             await context.bot.send_message(chat_id, "🏁 ডাটাবেজ খালি!")
@@ -187,19 +213,18 @@ async def email_worker(context: ContextTypes.DEFAULT_TYPE):
             IS_SENDING = False
             break
 
+        # Lock the lead
         leads_ref.child(target_key).update({'processing_by': bot_id})
         
         email = target_data.get('email')
         app_name = target_data.get('app_name', 'App Developer')
         
         # --- AI Processing ---
-        orig_sub = config['subject'].replace('{app_name}', app_name)
-        orig_body = config['body'].replace('{app_name}', app_name)
+        orig_sub = config.get('subject', 'Hello').replace('{app_name}', app_name)
+        orig_body = config.get('body', 'Hello').replace('{app_name}', app_name)
         
-        # AI Rewrite Call (Robust Version)
         final_subject, ai_body = await rewrite_email_with_ai(orig_sub, orig_body, app_name)
         
-        # Anti-Spam Hidden ID
         unique_id = generate_random_id()
         final_body = f"{ai_body}<br><br><span style='display:none;color:transparent;'>RefID: {unique_id}</span>"
 
@@ -227,13 +252,13 @@ async def email_worker(context: ContextTypes.DEFAULT_TYPE):
             elif count % 10 == 0:
                 await context.bot.send_message(chat_id, f"📊 রিপোর্ট: {count}টি ইমেইল পাঠানো হয়েছে।")
 
-            # Smart Random Delay (3-5 Mins)
             wait_time = random.randint(180, 300)
             await asyncio.sleep(wait_time)
 
         else:
+            # Release lock on failure
             leads_ref.child(target_key).update({'processing_by': None})
-            msg = res.get('message', '').lower()
+            msg = str(res.get('message', '')).lower()
             fail_count += 1
             
             logger.error(f"Failed ({email}): {msg}")
@@ -256,8 +281,7 @@ async def email_worker(context: ContextTypes.DEFAULT_TYPE):
 # --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id): return
-    await update.message.reply_text("🤖 **AI Email Sender (Stable)**\nLibrary Fixed: google-generativeai", 
-                                   reply_markup=main_menu_keyboard())
+    await update.message.reply_text("🤖 **AI Email Sender**\nStatus: Ready", reply_markup=main_menu_keyboard())
 
 async def button_tap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global IS_SENDING
@@ -275,18 +299,21 @@ async def button_tap(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(query.message.chat_id, "⚠️ No AI Keys found! Running in basic mode.")
             IS_SENDING = True
             context.job_queue.run_once(email_worker, 1, chat_id=query.message.chat_id)
-            await query.edit_message_text("🚀 Starting AI Sender...", reply_markup=back_button())
+            await query.edit_message_text("🚀 Starting Sender...", reply_markup=back_button())
             
     elif query.data == 'btn_stop_send':
         IS_SENDING = False
         await query.edit_message_text("🛑 Stopping...", reply_markup=back_button())
         
     elif query.data == 'btn_stats':
-        leads = db.reference('scraped_emails').get() or {}
-        total = len(leads)
-        sent = sum(1 for v in leads.values() if v.get('status') == 'sent')
-        await query.edit_message_text(f"📊 **Stats:**\nTotal: {total}\nSent: {sent}\nPending: {total-sent}", 
-                                     reply_markup=back_button())
+        try:
+            leads = db.reference('scraped_emails').get() or {}
+            total = len(leads)
+            sent = sum(1 for v in leads.values() if v.get('status') == 'sent')
+            await query.edit_message_text(f"📊 **Stats:**\nTotal: {total}\nSent: {sent}\nPending: {total-sent}", 
+                                         reply_markup=back_button())
+        except:
+             await query.edit_message_text("📊 Stats unavailable (DB Error)", reply_markup=back_button())
 
     elif query.data == 'btn_set_content':
         await query.edit_message_text("Usage:\n`/set_email Subject | Body`", reply_markup=back_button(), parse_mode="Markdown")
@@ -299,9 +326,12 @@ async def update_gas_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
         await u.message.reply_text("Usage: `/update_gas URL`")
         return
-    bot_id = TOKEN.split(':')[0]
-    db.reference(f'bot_configs/{bot_id}/gas_url').set(c.args[0])
-    await u.message.reply_text("✅ GAS URL Updated.")
+    try:
+        bot_id = TOKEN.split(':')[0]
+        db.reference(f'bot_configs/{bot_id}/gas_url').set(c.args[0])
+        await u.message.reply_text("✅ GAS URL Updated.")
+    except Exception as e:
+        await u.message.reply_text(f"❌ DB Error: {e}")
 
 async def set_email_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not is_owner(u.effective_user.id): return
@@ -318,13 +348,19 @@ async def set_email_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 async def confirm_reset_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not is_owner(u.effective_user.id): return
-    leads = db.reference('scraped_emails').get() or {}
-    for k in leads:
-        db.reference(f'scraped_emails/{k}').update({'status': None, 'processing_by': None, 'sent_by': None})
-    await u.message.reply_text("🔄 Database Reset Done.")
+    try:
+        leads = db.reference('scraped_emails').get() or {}
+        for k in leads:
+            db.reference(f'scraped_emails/{k}').update({'status': None, 'processing_by': None, 'sent_by': None})
+        await u.message.reply_text("🔄 Database Reset Done.")
+    except Exception as e:
+        await u.message.reply_text(f"❌ Error: {e}")
 
 def main():
-    if not TOKEN: return
+    if not TOKEN:
+        print("❌ Error: EMAIL_BOT_TOKEN not found in environment variables.")
+        return
+        
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("update_gas", update_gas_cmd))
@@ -332,10 +368,15 @@ def main():
     app.add_handler(CommandHandler("confirm_reset", confirm_reset_cmd))
     app.add_handler(CallbackQueryHandler(button_tap))
 
+    logger.info("🤖 Bot is starting...")
+    
     if RENDER_URL:
+        # Webhook Mode (For Render/Server)
         app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN[-10:], 
                         webhook_url=f"{RENDER_URL}/{TOKEN[-10:]}")
-    else: app.run_polling()
+    else:
+        # Polling Mode (For Local PC)
+        app.run_polling()
 
 if __name__ == "__main__":
     main()
