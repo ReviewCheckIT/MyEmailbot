@@ -91,8 +91,35 @@ async def rewrite_email_with_ai(original_sub, original_body, app_name):
         try:
             genai.configure(api_key=api_key)
             
-            # gemini-pro বাদ দেওয়া হয়েছে কারণ এটি এখন আর কাজ করছে না
-            models_to_try = ['gemini-1.5-flash']
+            # মডেল লিস্ট আপডেট করা হয়েছে (যাতে একটি না চললে অন্যটি চলে)
+        models_to_try = [
+            'gemini-1.5-flash',
+            'gemini-1.5-flash-latest',
+            'gemini-1.5-pro',
+            'gemini-1.0-pro',
+            'gemini-pro'
+        ]
+        
+        for model_name in models_to_try:
+            try:
+                # মডেল কনফিগার করা
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
+                
+                # রেস্পন্স চেক করা
+                if response and response.text:
+                    text = response.text.strip()
+                    if "|||" in text:
+                        parts = text.split("|||")
+                        new_sub = parts[0].replace("Subject:", "").strip()
+                        new_body = parts[1].replace("Body:", "").strip()
+                        new_body = new_body.replace('\n', '<br>')
+                        logger.info(f"✅ Success using model: {model_name}")
+                        return new_sub, new_body
+            except Exception as inner_e:
+                # 404 বা অন্য এরর আসলে লগ করবে কিন্তু থামবে না
+                # logger.warning(f"Model {model_name} skipped: {inner_e}") 
+                continue
             
             prompt = f"""
             Act as a professional app growth manager. Rewrite the email below for an Android App named "{app_name}".
