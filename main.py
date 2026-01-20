@@ -111,7 +111,7 @@ async def rewrite_email_with_ai(original_sub, original_body, app_name):
             """
             
             # ✅ ফিক্স: পুরনো মডেল বাদ দিয়ে নতুন মডেল দেওয়া হয়েছে
-            models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
+            models_to_try = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-pro']
             
             for model_name in models_to_try:
                 try:
